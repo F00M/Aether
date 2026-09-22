@@ -1,0 +1,8 @@
+# Pinned so a rebuilt facet matches the bytecode verified on the explorer.
+[profile.default]
+src = "src"
+out = "out"
+cache_path = "cache"
+solc_version = "0.8.26"
+optimizer = true
+optimizer_runs = 200
