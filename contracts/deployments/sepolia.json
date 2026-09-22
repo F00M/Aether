@@ -1,0 +1,58 @@
+{
+  "type": "EIP-2535 diamond",
+  "version": "3.1.0",
+  "diamond": "0xD21D6bCF47e8b7a0611C0d1d2f718c94B0aC3334",
+  "owner": "0xDA04759E54728B6636Fe48F7c9795c7B609bAaAa",
+  "deployTx": "0xa985dc3a6b81d9c6ff7e518bbf21e5863472e14d1e83a5c41171fa857c95a62f",
+  "cutTx": "0x825a0c10e1067b7acb22334d6a7ab34c9eeda1dc19344e177400f7a5d78cfa10",
+  "facets": {
+    "DiamondCutFacet": "0xD520b25C2Cb2FE554b871D68a8fC7B14f8153d95",
+    "DiamondLoupeFacet": "0x166e0644Cd4d34fd911fD52E75c5e085dBFda216",
+    "OwnershipFacet": "0x7aC152550E952a1758BC82096466BD8Cc78c0523",
+    "DexManagerFacet": "0x813dAC706d3D32E04d0bf7738F318B80f8CfFdC8",
+    "EmergencyPauseFacet": "0x370aD32a34ed0EE718A0500Ee19D6FC9687899D9",
+    "ConfigFacet": "0x34D7b8770D045FE902cAF3512956b19cd890c4e0",
+    "WithdrawFacet": "0xcBC64357F5A210A7be1b743BB568D64D191b2Ea8",
+    "AetherSwapFacet": "0xA1d092f90F2fB4E93C6c7376E5368cDF0bD79759",
+    "PoolCallbackFacet": "0x33d50F40a62618aDbfc66b0a0eAC4e86D5f6B0c8"
+  },
+  "init": "0xA7aDDe747153876B35FdfB8E195ea37805E5D1c2",
+  "replaces": "0xC9c7EE97229aE1996F81b7a7Cd0F9f285Edb06Cf",
+  "deployedAt": "2026-09-22T16:15:23.150Z",
+  "history": [
+    {
+      "facet": "AetherSwapFacet",
+      "from": [
+        "0xE8e8DbA5b551810430Da3bD811BdE70CAbf0D369"
+      ],
+      "to": "0x223adE61FCfa444C03a3701b38f740a48164e528",
+      "at": "2026-09-22T19:35:21.950Z"
+    },
+    {
+      "facet": "PoolCallbackFacet",
+      "from": [],
+      "to": "0xeCEbCf428A85C32E4fB5019c3D25D5cc87970747",
+      "at": "2026-09-22T19:35:23.816Z"
+    },
+    {
+      "facet": "AetherSwapFacet",
+      "from": [
+        "0xE8e8DbA5b551810430Da3bD811BdE70CAbf0D369"
+      ],
+      "to": "0xA1d092f90F2fB4E93C6c7376E5368cDF0bD79759",
+      "at": "2026-09-22T19:43:06.209Z"
+    },
+    {
+      "facet": "PoolCallbackFacet",
+      "from": [],
+      "to": "0x223adE61FCfa444C03a3701b38f740a48164e528",
+      "at": "2026-09-22T19:49:45.267Z"
+    },
+    {
+      "facet": "PoolCallbackFacet",
+      "from": [],
+      "to": "0x33d50F40a62618aDbfc66b0a0eAC4e86D5f6B0c8",
+      "at": "2026-09-22T19:51:32.060Z"
+    }
+  ]
+}
