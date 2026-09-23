@@ -1,4 +1,19 @@
-import { getDefaultConfig } from "@rainbow-me/rainbowkit";
+import { getDefaultConfig, type Wallet } from "@rainbow-me/rainbowkit";
+import {
+  baseAccount,
+  binanceWallet,
+  bitgetWallet,
+  injectedWallet,
+  metaMaskWallet,
+  okxWallet,
+  rabbyWallet,
+  rainbowWallet,
+  safeWallet,
+  safepalWallet,
+  tokenPocketWallet,
+  trustWallet,
+  walletConnectWallet,
+} from "@rainbow-me/rainbowkit/wallets";
 import { http } from "wagmi";
 import { sepolia } from "wagmi/chains";
 
@@ -23,10 +38,31 @@ const rpcUrl = /^https?:\/\//.test(configuredRpc)
     ? `${globalThis.location.origin}${configuredRpc}`
     : PUBLIC_RPC;
 
+// A wallet's in-app browser injects its provider, but RainbowKit's mobile sheet only lists wallets
+// named here (EIP-6963 "Installed" ones are desktop-only). This catches wallets not in the list,
+// and stays hidden in a plain mobile browser, where there is nothing to connect to.
+const browserWallet = (): Wallet => ({
+  ...injectedWallet(),
+  hidden: () => typeof window === "undefined" || !(window as { ethereum?: unknown }).ethereum,
+});
+
 export const config = getDefaultConfig({
   appName: "Aether",
   appDescription: "Aggregating Uniswap V2 · V3 · V4 on Sepolia.",
   projectId,
+  // The default list is only Safe, Rainbow, Base, MetaMask and WalletConnect; every other wallet sat
+  // behind the WalletConnect button. Each entry connects in its own in-app browser and deep-links
+  // through WalletConnect elsewhere.
+  wallets: [
+    {
+      groupName: "Popular",
+      wallets: [metaMaskWallet, trustWallet, okxWallet, bitgetWallet, binanceWallet, rabbyWallet],
+    },
+    {
+      groupName: "More",
+      wallets: [safepalWallet, tokenPocketWallet, rainbowWallet, baseAccount, safeWallet, browserWallet, walletConnectWallet],
+    },
+  ],
   chains: [sepolia],
   transports: {
     [sepolia.id]: http(rpcUrl),
