@@ -70,7 +70,11 @@ function isUserRejection(error: unknown): boolean {
 
 /** Keeps `parseUnits` from throwing on partial keystrokes like "1.2.3" or ".". */
 function sanitizeAmount(raw: string): string {
-  const cleaned = raw.replace(/[^\d.]/g, "");
+  // A phone's decimal keypad follows the device locale; an Indonesian one types "," for the
+  // decimal point. A lone comma is read as one. Next to a "." or repeated ("1,234.5", "1,000,000")
+  // commas are thousands separators and dropped.
+  const lone = raw.split(",").length === 2 && !raw.includes(".");
+  const cleaned = (lone ? raw.replace(",", ".") : raw).replace(/[^\d.]/g, "");
   const [whole, ...rest] = cleaned.split(".");
   if (!rest.length) return whole;
   return `${whole || "0"}.${rest.join("")}`;
