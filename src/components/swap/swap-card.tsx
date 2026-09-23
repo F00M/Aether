@@ -507,7 +507,10 @@ export function SwapCard() {
           slippage: activeSlippage,
           swapper: address,
         });
-        if (freshApi && BigInt(freshApi.amountOut) > BigInt(quote.totalAmountOut)) {
+        // An explicit pick is honoured as long as the API still quotes (as LI.FI's is); an
+        // automatic one must still beat the aggregator same-instant.
+        const apiPaysMore = Boolean(freshApi) && BigInt(freshApi!.amountOut) > BigInt(quote.totalAmountOut);
+        if (freshApi && (apiPaysMore || pinnedVenue === "api")) {
           apiTx = await fetchUniswapApiSwap(freshApi.raw);
           // Real preflight from the user's account — reverts surface here instead of on-chain.
           await publicClient?.call({
@@ -517,9 +520,14 @@ export function SwapCard() {
             value: apiTx.value,
           });
           setAutoSlipNote(
-            `The Uniswap API route pays more right now (${freshApi.amountOutFormatted} ${tokenOut.symbol}), so the swap was sent through it.`,
+            apiPaysMore
+              ? `The Uniswap API route pays more right now (${freshApi.amountOutFormatted} ${tokenOut.symbol}), so the swap was sent through it.`
+              : `Sent through the Uniswap API as selected (${freshApi.amountOutFormatted} ${tokenOut.symbol}).`,
           );
         } else if (freshApi) {
+          // Move the selection to the aggregator: left on the API, the next click re-runs this same
+          // check against the same numbers and never reaches the wallet.
+          setPinnedVenue("aether");
           setPriceMovedNote(
             "Re-checked at click time: the aggregator route now matches or beats the API. The quote is back in sync — press Swap again to execute through the aggregator.",
           );
@@ -859,6 +867,8 @@ export function SwapCard() {
       const aetherOut = BigInt(quote.totalAmountOut);
       const handicap = BigInt(lifiExtraTxs(fresh)) * EXTRA_TX_PENALTY_BPS;
       if (pinnedVenue !== "lifi" && (BigInt(fresh.amountOut) * (10000n - handicap)) / 10000n <= aetherOut) {
+        // Same as the API path: select Aether, or the next click lands back here.
+        setPinnedVenue("aether");
         setPriceMovedNote(
           "Re-checked at click time: Aether now matches or beats LI.FI. The quote is back in sync — press Swap again to execute through Aether.",
         );
