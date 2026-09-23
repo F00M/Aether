@@ -56,7 +56,7 @@ const ALLOWED_METHODS = new Set([
 ]);
 
 function upstreams(): string[] {
-  const configured = process.env.SEPOLIA_RPC_URLS ?? process.env.NEXT_PUBLIC_SEPOLIA_RPC_URLS ?? "";
+  const configured = process.env.SEPOLIA_RPC_URLS || process.env.NEXT_PUBLIC_SEPOLIA_RPC_URLS || "";
   const list = configured
     .split(",")
     .map((url) => url.trim())
