@@ -131,6 +131,15 @@ export function v4PoolId({ currency0, currency1, fee, tickSpacing, hooks }) {
   )
 }
 
+// The same id for the same pool object, worked out once: curated and feed pools live for the
+// session, and an estimate asks for a hundred-odd of them on every keystroke.
+const poolIds = new WeakMap()
+export function v4PoolIdOf(pool) {
+  let id = poolIds.get(pool)
+  if (!id) poolIds.set(pool, (id = v4PoolId(pool)))
+  return id
+}
+
 const asErc20 = token => (token.address === 'ETH' ? WETH : token.address)
 
 /**
@@ -311,7 +320,7 @@ export async function localEstimate({ tokenIn, tokenOut, amountIn, raw = false }
     const n0 = c0 === ETH_ADDRESS ? WETH.toLowerCase() : c0
     const n1 = c1 === ETH_ADDRESS ? WETH.toLowerCase() : c1
     if (!((n0 === inAddr && n1 === outAddr) || (n0 === outAddr && n1 === inAddr))) continue
-    const poolId = v4PoolId(p)
+    const poolId = v4PoolIdOf(p)
     candidates.push({
       kind: 2,
       poolId,

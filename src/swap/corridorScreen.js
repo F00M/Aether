@@ -13,7 +13,7 @@
 import { FEE_TIERS, ETH_ADDRESS, POOL_FACTORY, QUOTER_V2, V2_FACTORY, V4_QUOTER, WETH } from './quoteConfig'
 import { client, overRouteGasBudget } from './quoteProviders'
 import { quoterAbi, v4QuoterAbi } from './quoteAbis'
-import { v2AmountOut, v3AmountOut, v4PoolId } from './localQuote'
+import { v2AmountOut, v3AmountOut, v4PoolIdOf } from './localQuote'
 import { feedV2Pair, feedV3Pools, feedV4PoolsFor } from './poolFeed'
 import { addressWord, readCalls, resultWord, selector, uintWord } from './multicall3'
 
@@ -52,15 +52,6 @@ const WETH_NODE = lower(WETH)
 const node = address => {
   const key = lower(address)
   return key === ETH_ADDRESS ? WETH_NODE : key
-}
-
-// A pool's id is a hash of its key and never changes. Pool objects live as long as the feed
-// snapshot does, so the id is worked out once per pool rather than once per quote.
-const poolIds = new WeakMap()
-function poolIdOf(pool) {
-  let id = poolIds.get(pool)
-  if (!id) poolIds.set(pool, (id = v4PoolId(pool)))
-  return id
 }
 
 // A screen is a few loops over every candidate's pools. Hub detection runs them over every token
@@ -159,7 +150,7 @@ export function poolsForEdge(a, b, feed) {
     const node0 = node(pool.currency0)
     const node1 = node(pool.currency1)
     if (node0 !== far && node1 !== far) continue
-    const poolId = poolIdOf(pool)
+    const poolId = v4PoolIdOf(pool)
     pools.push({
       kind: 2, key: `2:${poolId}`, poolId, token0: node0,
       fee: Number(pool.fee), tickSpacing: Number(pool.tickSpacing), v4: pool,
