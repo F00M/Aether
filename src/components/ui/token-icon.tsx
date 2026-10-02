@@ -1,4 +1,5 @@
 import { GLYPHS } from "@/components/ui/token-glyphs";
+import { TOKENS } from "@/config/tokens";
 
 export type TokenLike = {
   symbol: string;
@@ -25,7 +26,10 @@ export function TokenIcon({
   className?: string;
 }) {
   const px = SIZES[size];
-  const Glyph = GLYPHS[token.symbol];
+  // Artwork goes by address, not by symbol: anyone can deploy a token that calls itself "USDC",
+  // and it must not show up wearing the real one's logo.
+  const listed = TOKENS.find((entry) => entry.symbol === token.symbol);
+  const Glyph = listed && listed.address.toLowerCase() === token.address.toLowerCase() ? GLYPHS[token.symbol] : undefined;
 
   if (Glyph) {
     return (

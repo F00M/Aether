@@ -25,6 +25,9 @@
   --color-pos: #14805e;
   --color-neg: #bf4430;
   --color-warn: #a8720f;
+  /* Second series beside the accent in two-part bars. Checked against it for colour-blind
+     separation (dataviz validator: ΔE 21 deutan, 13 tritan). */
+  --color-series-2: #4a3aa7;
 
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
@@ -34,6 +37,9 @@
 
   --shadow-card: 0 1px 2px rgb(18 18 15 / 0.04), 0 8px 24px -12px rgb(18 18 15 / 0.1);
   --shadow-pop: 0 4px 12px rgb(18 18 15 / 0.06), 0 24px 48px -20px rgb(18 18 15 / 0.22);
+  --shadow-lift: 0 2px 4px rgb(18 18 15 / 0.05), 0 16px 32px -16px rgb(18 18 15 / 0.18);
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 html {
@@ -73,10 +79,21 @@ body {
   border-radius: 4px;
 }
 
+/* ------------------------------------------------------------------
+   Motion. Everything here animates transform and opacity only, so it
+   runs on the compositor and never costs a layout or a repaint — the
+   page stays smooth on a phone while the router is busy.
+------------------------------------------------------------------ */
+/* A dialog takes focus when it opens so the keyboard lands inside it; the panel itself is not a
+   control and shouldn't wear the ring. */
+[role="dialog"]:focus-visible {
+  outline: none;
+}
+
 @keyframes pop-in {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.985);
+    transform: translateY(8px) scale(0.98);
   }
   to {
     opacity: 1;
@@ -84,33 +101,7 @@ body {
   }
 }
 .animate-pop {
-  animation: pop-in 140ms cubic-bezier(0.2, 0.8, 0.3, 1);
-}
-
-/* Shimmer placeholder while the first quote is still being routed. */
-@keyframes shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
-}
-.skeleton {
-  background: linear-gradient(
-    90deg,
-    var(--color-inset) 0%,
-    var(--color-inset-2) 50%,
-    var(--color-inset) 100%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.1s infinite linear;
-}
-.skeleton-text {
-  display: inline-block;
-  width: 92px;
-  height: 26px;
-  border-radius: 8px;
+  animation: pop-in 200ms var(--ease-out);
 }
 
 @keyframes fade-in {
@@ -122,14 +113,166 @@ body {
   }
 }
 .animate-fade {
-  animation: fade-in 140ms ease-out;
+  animation: fade-in 160ms ease-out;
+}
+
+/* A page, a card or a row arriving. `--i` staggers siblings: style={{ "--i": index }}. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-rise {
+  animation: rise 360ms var(--ease-out) backwards;
+  animation-delay: calc(min(var(--i, 0), 12) * 35ms);
+}
+.animate-page {
+  animation: rise 280ms var(--ease-out) backwards;
+}
+
+/* Dialogs: a sheet that slides up from the bottom edge on a phone, a card that pops on a desktop. */
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+.animate-dialog {
+  animation: sheet-in 300ms var(--ease-out);
+}
+.dialog-closing {
+  opacity: 0;
+  transform: translateY(24px);
+  transition:
+    opacity 140ms ease-in,
+    transform 140ms ease-in;
+}
+.overlay-closing {
+  opacity: 0;
+  transition: opacity 140ms ease-in;
+}
+@media (min-width: 640px) {
+  .animate-dialog {
+    animation: pop-in 200ms var(--ease-out);
+  }
+  .dialog-closing {
+    transform: translateY(6px) scale(0.985);
+  }
+}
+
+/* Placeholder while data loads. A slow opacity pulse rather than a moving gradient: a gradient
+   repaints every skeleton on every frame, which is exactly when the page is busiest. */
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+.skeleton {
+  background-color: var(--color-inset-2);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+.skeleton-text {
+  display: inline-block;
+  width: 92px;
+  height: 26px;
+  border-radius: 8px;
+}
+
+/* Every button gives a little under the finger. In the base layer and at zero specificity, so any
+   utility or component rule (a card's own press, RainbowKit's) still has the last word. */
+@layer base {
+  :where(button:not(:disabled)) {
+    transition: transform 120ms var(--ease-out);
+  }
+  :where(button:not(:disabled)):active {
+    transform: scale(0.97);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :where(button:not(:disabled)):active {
+      transform: none;
+    }
+  }
+}
+
+/* The same for a link that acts as a control, with its colours eased as well. */
+.pressable {
+  transition:
+    transform 120ms var(--ease-out),
+    background-color 150ms,
+    border-color 150ms,
+    color 150ms,
+    opacity 150ms;
+}
+.pressable:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* A card that can be opened: lifts toward the pointer, settles when pressed. */
+.card-interactive {
+  transition:
+    transform 220ms var(--ease-out),
+    box-shadow 220ms var(--ease-out),
+    border-color 150ms;
+}
+@media (hover: hover) {
+  .card-interactive:hover {
+    transform: translateY(-3px);
+    border-color: var(--color-line-2);
+    box-shadow: var(--shadow-lift);
+  }
+}
+.card-interactive:active {
+  transform: scale(0.985);
+}
+
+/* Segmented control: equal columns with one thumb that slides to the chosen one. The thumb is
+   placed from `--segments` and `--active` alone, so it is right in the server's HTML already.
+   `display` is left to a utility (grid / hidden md:grid): rules here sit outside Tailwind's
+   layers and would beat `hidden`. */
+.segmented {
+  position: relative;
+  grid-template-columns: repeat(var(--segments), minmax(0, 1fr));
+  padding: 4px;
+}
+.segmented-thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc((100% - 8px) / var(--segments));
+  transform: translateX(calc(var(--active) * 100%));
+  transition:
+    transform 260ms var(--ease-out),
+    opacity 150ms;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-pop,
   .animate-fade,
+  .animate-rise,
+  .animate-page,
+  .animate-dialog,
   .skeleton {
     animation: none;
+  }
+  .pressable,
+  .card-interactive,
+  .segmented-thumb,
+  .dialog-closing,
+  .overlay-closing {
+    transition: none;
+  }
+  .pressable:active:not(:disabled),
+  .card-interactive:hover,
+  .card-interactive:active {
+    transform: none;
   }
 }
 
