@@ -2061,7 +2061,14 @@ async function findSplitRoutesOnce(tokenIn, tokenOut, amountRaw, options = {}) {
       if (pct === 0) continue
       const hasReQuote = reQuoted[i].status === 'fulfilled' && reQuoted[i].value > 0n
       if (!hasReQuote && splits[i].route.probeOnly) continue
-      const amountOut = hasReQuote ? reQuoted[i].value : BigInt(splits[i].route.amountOut)
+      // A share whose re-quote failed is priced pro rata from the route's full-amount quote. Keeping
+      // the full-amount output next to the share's input counted that pool once per route: one
+      // dropped call showed 0.7 ETH paying 94k USDC/ETH. Pro rata errs low — a smaller trade moves
+      // the pool less than the full one did.
+      const amountOut = hasReQuote
+        ? reQuoted[i].value
+        : (BigInt(splits[i].route.amountOut) * splits[i].portion) / amountRawBig
+      if (amountOut <= 0n) continue
       routes.push({
         ...splits[i].route,
         percent:  pct,
