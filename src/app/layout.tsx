@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 
 import { Providers } from "@/app/providers";
 import { SiteHeader } from "@/components/site-header";
+import { Toaster } from "@/components/ui/toaster";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -20,8 +21,7 @@ export const metadata: Metadata = {
     default: "Aether — DEX aggregator",
     template: "%s · Aether",
   },
-  description:
-    "Aggregating Uniswap V2, V3 and V4 liquidity on Sepolia. Split routing, executable quotes, non-custodial.",
+  description: "DEX aggregator on Sepolia.",
 };
 
 export default function RootLayout({
@@ -38,6 +38,7 @@ export default function RootLayout({
         <Providers>
           <SiteHeader />
           <main className="flex-1">{children}</main>
+          <Toaster />
         </Providers>
       </body>
     </html>

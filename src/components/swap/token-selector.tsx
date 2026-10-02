@@ -162,7 +162,8 @@ export function TokenSelector({
             placeholder="Search name or paste address"
             aria-label="Search tokens"
             autoComplete="off"
-            className="w-full bg-transparent text-[14px] outline-none placeholder:text-ink-3"
+            // 16px on a phone: iOS Safari zooms the page into any field with smaller text.
+            className="w-full bg-transparent text-[16px] outline-none placeholder:text-ink-3 sm:text-[14px]"
           />
         </div>
       </div>

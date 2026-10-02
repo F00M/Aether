@@ -16,7 +16,7 @@ import {
 import { ExecutionSteps, type ExecStep } from "@/components/swap/execution-steps";
 import { RoutesPanel } from "@/components/swap/routes-panel";
 import { TokenSelector } from "@/components/swap/token-selector";
-import { TxStatus } from "@/components/swap/tx-status";
+import { notify } from "@/components/ui/toaster";
 import { TokenIcon } from "@/components/ui/token-icon";
 import { TOKENS } from "@/config/tokens";
 import {
@@ -46,6 +46,8 @@ import {
   classifyFailingRoutes,
   buildSwapCalldata,
 } from "@/swap/aetherBuilder";
+import { sanitizeAmount } from "@/lib/amount-input";
+import { formatAmount } from "@/lib/format";
 import { EXTRA_TX_PENALTY_BPS, autoVenue, lifiExtraTxs } from "@/lib/venue";
 import { fetchLifiQuote, LIFI_DIAMOND } from "@/swap/lifi";
 import { fetchUniswapApiQuote, fetchUniswapApiSwap, findSplitRoutes } from "@/swap/quoteEngine";
@@ -53,6 +55,13 @@ import type { Quote, Route, Token, Venue } from "@/swap/types";
 
 const SEPOLIA_ID = 11155111;
 const NATIVE = "0x0000000000000000000000000000000000000000";
+// Shares of the balance offered under the amount field; 100 is "Max".
+const BALANCE_SHARES = [25, 50, 100] as const;
+// Kept back when a share of an ETH balance is filled in: the swap's own gas still has to be paid.
+const ETH_GAS_RESERVE = 5_000_000_000_000_000n; // 0.005 ETH
+// Price impact, in percent, from which a swap is flagged, and from which it needs an explicit yes.
+const HIGH_IMPACT_PCT = 3;
+const SEVERE_IMPACT_PCT = 15;
 // Fly (LI.FI's Sepolia swap tool) only accepts calldata its backend signed recently. When a wrap
 // or approval ran first, the quote is re-fetched if it's older than this before the swap is sent.
 const LIFI_CALLDATA_MAX_AGE_MS = 25_000;
@@ -66,18 +75,6 @@ function isUserRejection(error: unknown): boolean {
     e?.name === "UserRejectedRequestError" ||
     /user rejected|user denied|rejected the request/i.test(`${e?.shortMessage ?? ""} ${e?.message ?? ""}`)
   );
-}
-
-/** Keeps `parseUnits` from throwing on partial keystrokes like "1.2.3" or ".". */
-function sanitizeAmount(raw: string): string {
-  // A phone's decimal keypad follows the device locale; an Indonesian one types "," for the
-  // decimal point. A lone comma is read as one. Next to a "." or repeated ("1,234.5", "1,000,000")
-  // commas are thousands separators and dropped.
-  const lone = raw.split(",").length === 2 && !raw.includes(".");
-  const cleaned = (lone ? raw.replace(",", ".") : raw).replace(/[^\d.]/g, "");
-  const [whole, ...rest] = cleaned.split(".");
-  if (!rest.length) return whole;
-  return `${whole || "0"}.${rest.join("")}`;
 }
 
 const AMOUNT_MAX_PX = 30;
@@ -148,6 +145,8 @@ export function SwapCard() {
   const [pinnedVenue, setPinnedVenue] = useState<Venue | null>(null);
   const [execSteps, setExecSteps] = useState<ExecStep[] | null>(null);
   const [isExecutingLifi, setIsExecutingLifi] = useState(false);
+  // The user's explicit yes to a swap whose price impact is severe. Per pair+amount, like the rest.
+  const [impactAccepted, setImpactAccepted] = useState(false);
 
   const activeSlippage = "0.5"; // base floor; the auto-slippage ladder widens this up to +7% at execution
   const {
@@ -165,17 +164,10 @@ export function SwapCard() {
   });
 
   const { sendTransaction, sendTransactionAsync, data: txHash } = useSendTransaction();
-  // A second sender for LI.FI's side steps (wrap / approve / unwrap), so the TxStatus banner and
-  // the post-swap refresh keep tracking only the swap itself.
+  // A second sender for LI.FI's side steps (wrap / approve / unwrap), so the notice and the
+  // post-swap refresh keep tracking only the swap itself.
   const { sendTransactionAsync: sendStepTransaction } = useSendTransaction();
   const { status: receiptStatus } = useWaitForTransactionReceipt({ hash: txHash });
-  const txStatus = txHash
-    ? receiptStatus === "success"
-      ? "success"
-      : receiptStatus === "error"
-        ? "error"
-        : "pending"
-    : null;
 
   const { writeContract, data: pendingTxHash } = useWriteContract();
   const { status: pendingStatus } = useWaitForTransactionReceipt({ hash: pendingTxHash });
@@ -183,6 +175,30 @@ export function SwapCard() {
   const isETH = tokenIn.address === "ETH";
   const isWrapMode = isEthWethPair(tokenIn, tokenOut) as boolean;
   const tokenAddress = (isETH ? WETH_ADDRESS : tokenIn.address) as `0x${string}`;
+
+  // One small notice per transaction, in the corner: sent, then confirmed or failed. It keeps the
+  // description it was first given, so editing the form afterwards doesn't relabel a sent swap.
+  const action = isWrapMode ? (isETH ? "Wrap" : "Unwrap") : "Swap";
+  useEffect(() => {
+    if (!txHash) return;
+    notify({
+      id: txHash,
+      hash: txHash,
+      status: receiptStatus === "success" ? "success" : receiptStatus === "error" ? "error" : "pending",
+      title: `${action} ${receiptStatus === "success" ? "confirmed" : receiptStatus === "error" ? "failed" : "submitted"}`,
+      detail: `${amountIn} ${tokenIn.symbol} → ${tokenOut.symbol}`,
+    });
+  }, [txHash, receiptStatus, action, amountIn, tokenIn.symbol, tokenOut.symbol]);
+  useEffect(() => {
+    if (!pendingTxHash) return;
+    notify({
+      id: pendingTxHash,
+      hash: pendingTxHash,
+      status: pendingStatus === "success" ? "success" : pendingStatus === "error" ? "error" : "pending",
+      title: `Approval ${pendingStatus === "success" ? "confirmed" : pendingStatus === "error" ? "failed" : "submitted"}`,
+      detail: tokenIn.symbol,
+    });
+  }, [pendingTxHash, pendingStatus, tokenIn.symbol]);
 
   const usesUniversalRouter = !quoteCanUseAether(quote);
 
@@ -322,6 +338,7 @@ export function SwapCard() {
     setLifiExecBroken(false);
     setPinnedVenue(null);
     setExecSteps(null);
+    setImpactAccepted(false);
   }, [tokenIn.address, tokenOut.address, amountIn]);
 
   useEffect(() => {
@@ -1021,6 +1038,25 @@ export function SwapCard() {
     return formatUnits(tokenBalance as bigint, tokenIn.decimals || 18);
   }, [tokenBalance, nativeBalance?.value, tokenIn.decimals, address, isETH]);
 
+  // What a balance share is taken from: the whole token balance, or the ETH balance minus the gas
+  // reserve. Null until the balance is known.
+  const spendable = useMemo(() => {
+    if (!address) return null;
+    const balance = isETH ? nativeBalance?.value : (tokenBalance as bigint | undefined);
+    if (balance === undefined) return null;
+    if (!isETH) return balance;
+    return balance > ETH_GAS_RESERVE ? balance - ETH_GAS_RESERVE : 0n;
+  }, [address, isETH, nativeBalance?.value, tokenBalance]);
+
+  const fillBalanceShare = (share: number) => {
+    if (!spendable) return;
+    // Max is exact so no dust stays behind; a partial share doesn't need 18 decimals of it.
+    const exact = formatUnits(share === 100 ? spendable : (spendable * BigInt(share)) / 100n, tokenIn.decimals || 18);
+    const [whole, fraction = ""] = exact.split(".");
+    const kept = share === 100 ? fraction : fraction.slice(0, 6).replace(/0+$/, "");
+    setAmountIn(kept ? `${whole}.${kept}` : whole);
+  };
+
   const balanceLabel = useMemo(() => {
     if (!address) return "0.0000";
     if (balanceFormatted === null) return "…";
@@ -1059,6 +1095,7 @@ export function SwapCard() {
     }
     if (quoteLoading) return "Fetching best price…";
     if (isPreflighting) return "Checking route…";
+    if (needsImpactConsent && !impactAccepted) return "Confirm the price impact first";
     if (isApproving) return `Step ${approvalIndex}/${approvalTotal}: Approving…`;
     if (lifiActive) return lifiQuote?.wrapInput || lifiQuote?.unwrapOutput ? "Swap via LI.FI (multi-step)" : "Swap via LI.FI";
     if (needsApproval) return "Approve & Swap";
@@ -1066,6 +1103,12 @@ export function SwapCard() {
     if (apiWins) return "Swap via Uniswap API";
     return "Swap";
   };
+
+  const impactPct = quote ? parseFloat(quote.priceImpactPct) : 0;
+  // The impact figure describes the engine's own routes, so the gate only applies when those are
+  // what executes — the Uniswap API and LI.FI route through pools this number doesn't measure.
+  const needsImpactConsent =
+    Boolean(quote) && !quote?.provisional && !isWrapMode && !lifiActive && !apiWins && impactPct > SEVERE_IMPACT_PCT;
 
   const isDisabled =
     isConnected &&
@@ -1077,7 +1120,8 @@ export function SwapCard() {
       isApproving ||
       isPreflighting ||
       isExecutingLifi ||
-      insufficientBalance);
+      insufficientBalance ||
+      (needsImpactConsent && !impactAccepted));
 
   // What the wallet receives on the venue that will execute — the output field, rate and minimum
   // follow the selection so the number on screen is never another venue's.
@@ -1106,8 +1150,26 @@ export function SwapCard() {
     return { formatted: quote.amountOutFormatted, min: quote.minOutFormatted, rate: quote.rate, via: null };
   }, [quote, lifiActive, lifiQuote, apiWins, amountIn, tokenOut.decimals]);
 
-  const impactPct = quote ? parseFloat(quote.priceImpactPct) : 0;
+  // What Aether keeps from this swap, in the output token. Only when Aether executes it: the
+  // Uniswap API and Universal Router paths don't go through the diamond, and LI.FI has its own row.
+  const aetherFee = useMemo(() => {
+    const bps = quote?.aetherFeeBps ?? 0;
+    if (!quote || !bps || isWrapMode || lifiActive || apiWins || usesUniversalRouter) return null;
+    // The total on screen is already net (gross − gross × bps / 10000), so this recovers the fee.
+    const taken = (BigInt(quote.totalAmountOut) * BigInt(bps)) / BigInt(10000 - bps);
+    return {
+      percent: (bps / 100).toFixed(2),
+      amount: formatAmount(Number(formatUnits(taken, tokenOut.decimals))),
+    };
+  }, [quote, isWrapMode, lifiActive, apiWins, usesUniversalRouter, tokenOut.decimals]);
+
   const title = isWrapMode ? (tokenIn.address === "ETH" ? "Wrap" : "Unwrap") : "Swap";
+  // What a details row shows while there is no quote: a pulse while one is on its way, a dash otherwise.
+  const pendingValue = quoteLoading ? (
+    <span className="skeleton inline-block h-3 w-24 rounded align-middle" aria-label="Loading" />
+  ) : (
+    <span className="text-ink-3">—</span>
+  );
 
   const amountOutText = quoteLoading && !quote ? "" : (activeOut?.formatted ?? "0.0");
   const [amountInRef, amountInFontSize] = useAmountFontSize<HTMLInputElement>(amountIn || "0.0");
@@ -1169,15 +1231,18 @@ export function SwapCard() {
               ) : null}
               <button
                 type="button"
-                onClick={() => balanceFormatted && setAmountIn(balanceFormatted)}
-                className="nums text-[12px] text-ink-2 transition-colors hover:text-accent"
+                onClick={() => fillBalanceShare(100)}
+                // The padding is tap area only; the negative margin keeps the row's height.
+                className="nums -my-2 py-2 text-[12px] text-ink-2 transition-colors hover:text-accent"
               >
                 Balance: {balanceLabel}
               </button>
             </div>
           </div>
 
-          <div className="mt-1 flex items-center gap-3">
+          {/* The amount shrinks its font to fit. The row keeps the height of the largest size, so the
+              box around it doesn't shrink with it. */}
+          <div className="mt-1 flex h-[45px] items-center gap-3">
             <input
               id="amount-in"
               value={amountIn}
@@ -1191,6 +1256,29 @@ export function SwapCard() {
             />
             <TokenButton token={tokenIn} onClick={() => setSelectorFor("in")} />
           </div>
+
+          {/* Present whenever a wallet is connected, disabled until there is something to spend:
+              the row arriving with the balance used to push everything below it down. */}
+          {address ? (
+            <div className="mt-2 flex items-center gap-1.5" role="group" aria-label="Use a share of the balance">
+              {BALANCE_SHARES.map((share) => (
+                <button
+                  key={share}
+                  type="button"
+                  disabled={!spendable}
+                  onClick={() => fillBalanceShare(share)}
+                  title={
+                    isETH
+                      ? `${share === 100 ? "All" : `${share}%`} of the balance, after keeping ${formatUnits(ETH_GAS_RESERVE, 18)} ETH for gas`
+                      : undefined
+                  }
+                  className="rounded-md border border-line bg-surface px-2 py-0.5 text-[11.5px] font-medium text-ink-2 transition-colors hover:border-line-2 hover:text-ink disabled:cursor-not-allowed disabled:text-ink-3 disabled:hover:border-line disabled:hover:text-ink-3"
+                >
+                  {share === 100 ? "Max" : `${share}%`}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         {/* Flip */}
@@ -1239,7 +1327,7 @@ export function SwapCard() {
             ) : null}
           </div>
 
-          <div className="mt-1 flex items-center gap-3">
+          <div className="mt-1 flex h-[45px] items-center gap-3">
             <span
               ref={amountOutRef}
               style={{ fontSize: amountOutFontSize }}
@@ -1272,46 +1360,72 @@ export function SwapCard() {
             </div>
           ) : null}
 
-          {quote ? (
-            <dl className="space-y-1.5 text-[12.5px]">
-              <div className="flex items-center justify-between gap-3">
-                <dt className="text-ink-2">Rate</dt>
-                <dd className="nums text-right">
-                  1 {tokenIn.symbol} = {activeOut?.rate ?? quote.rate} {tokenOut.symbol}
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <dt className="text-ink-2">
-                  {isWrapMode ? "You receive" : "Min executable received"}
+          {/* The rows are the same before, during and after a quote — only their values change.
+              They used to appear with the quote, and the Swap button jumped 69px each time. */}
+          <dl className="space-y-1.5 text-[12.5px]">
+            <div className={DETAIL_ROW}>
+              <dt className="shrink-0 text-ink-2">Rate</dt>
+              <dd className="nums min-w-0 truncate text-right">
+                {quote ? `1 ${tokenIn.symbol} = ${activeOut?.rate ?? quote.rate} ${tokenOut.symbol}` : pendingValue}
+              </dd>
+            </div>
+            <div className={DETAIL_ROW}>
+              <dt className="shrink-0 text-ink-2">
+                {isWrapMode ? (
+                  "You receive"
+                ) : (
+                  <>
+                    {/* The full phrase doesn't fit beside a long amount on a phone. */}
+                    Min <span className="hidden sm:inline">executable </span>received
+                  </>
+                )}
+              </dt>
+              <dd className="nums min-w-0 truncate text-right">
+                {quote ? `${activeOut?.min ?? quote.minOutFormatted} ${tokenOut.symbol}` : pendingValue}
+              </dd>
+            </div>
+            {isWrapMode ? null : (
+              <div className={DETAIL_ROW}>
+                <dt className="shrink-0 text-ink-2">
+                  {lifiActive && lifiQuote ? "Fee LI.FI" : aetherFee ? `Fee Aether (${aetherFee.percent}%)` : "Fee Aether"}
                 </dt>
-                <dd className="nums text-right">
-                  {activeOut?.min ?? quote.minOutFormatted} {tokenOut.symbol}
-                </dd>
+                {!quote || quote.provisional ? (
+                  <dd className="nums text-right text-ink-2">{pendingValue}</dd>
+                ) : lifiActive && lifiQuote ? (
+                  <dd className="nums min-w-0 truncate text-right text-ink-2">{(lifiQuote.feePct * 100).toFixed(2)}% · already deducted</dd>
+                ) : aetherFee ? (
+                  <dd
+                    title="Taken from the swap's output. The amounts above are what you receive after it."
+                    className="nums min-w-0 truncate text-right text-ink-2"
+                  >
+                    {aetherFee.amount} {tokenOut.symbol}
+                    {/* No room for the note beside the label on a phone; the route card says it too. */}
+                    <span className="hidden sm:inline"> · already deducted</span>
+                  </dd>
+                ) : (
+                  <dd title="This route doesn't pass through the Aether router, so Aether takes nothing from it." className="min-w-0 truncate text-right text-ink-2">
+                    None on this route
+                  </dd>
+                )}
               </div>
-              {lifiActive && lifiQuote ? (
-                <div className="flex items-center justify-between gap-3">
-                  <dt className="text-ink-2">Fee LI.FI</dt>
-                  <dd className="nums text-right text-ink-2">
-                    {(lifiQuote.feePct * 100).toFixed(2)}% · already deducted
-                  </dd>
-                </div>
-              ) : null}
+            )}
+            <div className={DETAIL_ROW}>
+              <dt className="shrink-0 text-ink-2">Price impact</dt>
               {isWrapMode ? (
-                <div className="flex items-center justify-between gap-3">
-                  <dt className="text-ink-2">Price impact</dt>
-                  <dd className="nums text-accent">0.00%</dd>
-                </div>
-              ) : null}
-              {!isWrapMode && impactPct > 0.1 ? (
-                <div className="flex items-center justify-between gap-3">
-                  <dt className="text-ink-2">Price impact</dt>
-                  <dd className={`nums ${impactPct > 3 ? "text-neg" : "text-warn"}`}>
-                    -{quote.priceImpactPct}%
-                  </dd>
-                </div>
-              ) : null}
-            </dl>
-          ) : null}
+                <dd className="nums text-accent">0.00%</dd>
+              ) : !quote || quote.provisional ? (
+                <dd className="nums text-ink-2">{pendingValue}</dd>
+              ) : impactPct > 0 ? (
+                <dd className={`nums ${impactPct > HIGH_IMPACT_PCT ? "text-neg" : impactPct > 0.1 ? "text-warn" : "text-ink-2"}`}>
+                  -{quote.priceImpactPct}%
+                </dd>
+              ) : (
+                <dd title="Not measured for this route. Multi-hop and V4 routes don't report one." className="nums text-ink-3">
+                  —
+                </dd>
+              )}
+            </div>
+          </dl>
         </div>
 
         {quoteError ? <Notice tone="neg">{quoteError}</Notice> : null}
@@ -1323,11 +1437,27 @@ export function SwapCard() {
           </Notice>
         ) : null}
 
-        {!isWrapMode && quote && impactPct > 3 ? (
+        {!isWrapMode && quote && impactPct > HIGH_IMPACT_PCT ? (
           <Notice tone="neg">
-            This is only the best executable route found. The price impact is high, so consider a
-            smaller amount or wait for deeper liquidity.
+            High price impact: this swap moves the pools about {quote.priceImpactPct}% against you,
+            so you receive that much less than the current rate. This is already the best
+            executable route found — consider a smaller amount or wait for deeper liquidity.
           </Notice>
+        ) : null}
+
+        {needsImpactConsent && quote ? (
+          <label className="mt-2.5 flex cursor-pointer items-start gap-2.5 rounded-field border border-neg/22 bg-neg/8 px-3.5 py-2.5 text-[12.5px] leading-relaxed text-neg">
+            <input
+              type="checkbox"
+              checked={impactAccepted}
+              onChange={(event) => setImpactAccepted(event.target.checked)}
+              className="mt-0.5 size-4 shrink-0 accent-neg"
+            />
+            <span>
+              I understand this swap loses about {quote.priceImpactPct}% to price impact, and I want
+              to make it anyway.
+            </span>
+          </label>
         ) : null}
 
         {preflightError ? <Notice tone="warn">{preflightError}</Notice> : null}
@@ -1351,7 +1481,6 @@ export function SwapCard() {
         </button>
 
         <ExecutionSteps steps={execSteps} />
-        <TxStatus hash={txHash} status={txStatus} />
       </section>
 
       {!isWrapMode ? (
@@ -1388,6 +1517,10 @@ export function SwapCard() {
   );
 }
 
+// One line, always: a row that wrapped on a narrow screen made the card taller only once a quote
+// with a long number arrived.
+const DETAIL_ROW = "flex h-[19px] items-center justify-between gap-3";
+
 function TokenButton({ token, onClick }: { token: Token; onClick: () => void }) {
   return (
     <button
@@ -1416,7 +1549,7 @@ function Notice({ tone, children }: { tone: "neg" | "warn"; children: React.Reac
       ? "border-neg/22 bg-neg/8 text-neg"
       : "border-warn/25 bg-warn/8 text-warn";
   return (
-    <p className={`mt-2.5 rounded-field border px-3.5 py-2.5 text-[12.5px] leading-relaxed ${cls}`}>
+    <p className={`animate-fade mt-2.5 rounded-field border px-3.5 py-2.5 text-[12.5px] leading-relaxed ${cls}`}>
       {children}
     </p>
   );
