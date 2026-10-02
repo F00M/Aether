@@ -431,13 +431,19 @@ export function poolFeedSnapshot() {
 
 // ------------------------------------------------------------------ queries
 
+const WETH_KEY = lower(WETH)
+const wethV4Lists = new WeakMap()   // an index's v4ByCurrency -> WETH's own pools + the native-ETH ones
+
 /** Every no-hook V4 pool touching `currency`; WETH also returns the native-ETH pools it can use. */
 export function feedV4PoolsFor(feed, currency) {
   if (!feed) return []
   const key = lower(currency)
   const direct = feed.v4ByCurrency.get(key) ?? []
-  if (key !== lower(WETH)) return direct
-  return [...direct, ...(feed.v4ByCurrency.get(ETH_ADDRESS) ?? [])]
+  if (key !== WETH_KEY) return direct
+  // WETH's list is ~10k pools and a screen asks for it once per candidate: joined once per index.
+  let joined = wethV4Lists.get(feed.v4ByCurrency)
+  if (!joined) wethV4Lists.set(feed.v4ByCurrency, (joined = [...direct, ...(feed.v4ByCurrency.get(ETH_ADDRESS) ?? [])]))
+  return joined
 }
 
 /**

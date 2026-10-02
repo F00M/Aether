@@ -17,7 +17,7 @@
 //           an initialized tick changes L, which needs tick bitmap data we do
 //           not fetch, so those results are flagged `approx` instead of hidden.
 
-import { keccak256, encodeAbiParameters } from 'viem'
+import { keccak256 } from 'viem'
 
 import { client, discoverV4PoolsForCurrency } from './quoteProviders'
 import { poolAbi, v2FactoryAbi, v2PairAbi } from './quoteAbis'
@@ -118,16 +118,16 @@ const depthSufficient = (depthIn, amountIn) => depthIn >= amountIn * DEPTH_SAFET
 
 /* ------------------------------------------------- pool key / discovery */
 
-const POOL_KEY_COMPONENTS = [
-  { type: 'address' }, { type: 'address' }, { type: 'uint24' }, { type: 'int24' }, { type: 'address' },
-]
+// abi.encode(PoolKey) is five 32-byte words; they are laid out by hand because a first screen
+// works out thousands of ids in one go and the generic encoder was half of that time.
+const addressWord = address => address.slice(2).toLowerCase().padStart(64, '0')
+const uintWord = value => BigInt(value).toString(16).padStart(64, '0')
+const intWord = value => BigInt.asUintN(256, BigInt(value)).toString(16).padStart(64, '0')
 
 /** V4 pools are addressed by keccak(PoolKey), not by a contract address. */
 export function v4PoolId({ currency0, currency1, fee, tickSpacing, hooks }) {
   return keccak256(
-    encodeAbiParameters(POOL_KEY_COMPONENTS, [
-      currency0, currency1, Number(fee), Number(tickSpacing), hooks ?? ETH_ADDRESS,
-    ]),
+    `0x${addressWord(currency0)}${addressWord(currency1)}${uintWord(Number(fee))}${intWord(Number(tickSpacing))}${addressWord(hooks ?? ETH_ADDRESS)}`,
   )
 }
 
