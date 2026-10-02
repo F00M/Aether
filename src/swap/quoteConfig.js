@@ -7,6 +7,9 @@ export const UNIVERSAL_ROUTER = '0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b'
 // execute-via-API path must name this router as spender or every API execution preflight reverts.
 export const UNISWAP_API_ROUTER = '0x02E5be68D46DAc0B524905bfF209cf47EE6dB2a9'
 export const POSITION_MANAGER = '0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4'
+// Uniswap V3's NonfungiblePositionManager on Sepolia (its factory() is POOL_FACTORY, its WETH9()
+// is WETH). The one above is V4's; liquidity positions on the Pools page are V3.
+export const V3_POSITION_MANAGER = '0x1238536071E1c677A632429e3655c799b22cDA52'
 export const POOL_MANAGER = '0xE03A1074c86CFeDd5C142C4F04F1a1536e203543'
 export const V2_FACTORY = '0xF62c03E08ada871A0bEb309762E260a7a6a880E6'
 export const V2_ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
@@ -15,6 +18,9 @@ export const V2_ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
 // contracts/deployments/sepolia.json.
 const DEFAULT_AETHER_AGGREGATOR = '0xD21D6bCF47e8b7a0611C0d1d2f718c94B0aC3334'
 export const AETHER_AGGREGATOR = process.env.NEXT_PUBLIC_AETHER_AGGREGATOR_ADDRESS || DEFAULT_AETHER_AGGREGATOR
+// Block of the default diamond's deployment: event history never needs to look further back. 0 for
+// any other address, whose deployment block is unknown here.
+export const AETHER_DEPLOY_BLOCK = AETHER_AGGREGATOR.toLowerCase() === DEFAULT_AETHER_AGGREGATOR.toLowerCase() ? 11758984n : 0n
 // V3/V2 legs that call the pool directly and pay inside the swap callback: ~31k gas cheaper per V3
 // leg, no approvals. Live since the diamond runs AetherSwapFacet 3.1 + PoolCallbackFacet (2026-09-23);
 // set NEXT_PUBLIC_AETHER_DIRECT_POOL_LEGS=0 to fall back to the router legs.
