@@ -42,7 +42,9 @@ function buildCards(quote: Quote): Card[] {
     detail: quote.routes.length > 1 ? `Split across ${quote.routes.length} routes · ${protocols}` : `Single route · ${protocols}`,
     amountOut: BigInt(quote.totalAmountOut),
     amountOutFormatted: quote.amountOutFormatted,
-    fee: "Pool fees only",
+    fee: quote.aetherFeeBps
+      ? `${(quote.aetherFeeBps / 100).toFixed(2)}% Aether fee (already deducted)`
+      : "Pool fees only",
     steps: "1 tx",
   });
 

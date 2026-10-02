@@ -11,6 +11,7 @@ import {
   classifyFailingRoutes,
   quoteCanUseAether,
 } from '../swap/aetherBuilder'
+import { aetherFeeBps, loadAetherFee, netOfAetherFee } from '../swap/aetherFee'
 import { calibrateLocal, invalidateLocalState, localEstimate } from '../swap/localQuote'
 import { fetchLifiQuote } from '../swap/lifi'
 import {
@@ -146,6 +147,7 @@ function buildRouteQuote({ split, apiQuote, lifiQuote, tokenIn, tokenOut, amount
     } : null,
     lifiQuote: compareLifi(lifiQuote, split.totalAmountOut, tokenOut),
     sharedPoolsMerged: split.sharedPoolsMerged ?? 0,
+    aetherFeeBps: split.aetherFeeBps ?? 0,
   }
 }
 
@@ -178,6 +180,14 @@ function attachApiQuote(current, apiQuote, tokenOut) {
 // preflight re-measures and re-syncs honestly).
 const splitAmountIn = split =>
   BigInt(split.totalAmountIn ?? 0) || split.routes.reduce((sum, route) => sum + BigInt(route.amountIn), 0n)
+
+// The engine's total is what the pools pay out; execute() keeps the protocol fee before paying the
+// recipient, so the number that goes on screen is net of it. A set Aether can't run goes to the
+// Universal Router directly and pays no protocol fee.
+function netSplit(split) {
+  if (!split?.routes?.length || !quoteCanUseAether({ routes: split.routes })) return split
+  return { ...split, totalAmountOut: netOfAetherFee(split.totalAmountOut), aetherFeeBps: Number(aetherFeeBps()) }
+}
 
 // A revert that says "this wallet can't fund the swap yet" (no approval, balance short) rather than
 // "a route in this set is dead". The click flow handles funding; screening routes for it is waste.
@@ -380,14 +390,18 @@ export function useQuote({ tokenIn, tokenOut, amountIn, slippage, swapper, block
 
         const blockedKeys = () => withDeadRouteKeys(tokenIn, tokenOut, blockedRouteKeys)
 
+        // One cached read, started alongside the scan so it never adds to the wait.
+        const feeLoaded = loadAetherFee(publicClient)
+
         let fastScanImpact = 0
         let fastScanOut = 0
         try {
           const fastSplit = await findSplitRoutes(tokenIn, tokenOut, amountRaw, { fast: true, blockedRouteKeys: blockedKeys() })
+          await feeLoaded
           if (!isCurrentRun()) return
           fastScanImpact = fastSplit?.priceImpact ?? 0
           fastScanOut = fastSplit?.totalAmountOut ? Number(fastSplit.totalAmountOut) / 10 ** tokenOut.decimals : 0
-          showSplit(fastSplit)
+          showSplit(netSplit(fastSplit))
           setLoading(false)
         } catch {
           // Fall through to the full router if the fast path has no usable pool.
@@ -429,17 +443,20 @@ export function useQuote({ tokenIn, tokenOut, amountIn, slippage, swapper, block
             if (!isCurrentRun()) return
           }
         }
+        await feeLoaded
+        if (!isCurrentRun()) return
         const executedTotal = executed.total
-        showSplit(
-          executedTotal ? { ...fullSplit, totalAmountOut: executedTotal, executedTotalSimulated: true } : fullSplit,
-          { final: true },
-        )
+        // execute() returns what the recipient gets, so a simulated total is already net of the fee.
+        const finalSplit = executedTotal
+          ? { ...fullSplit, totalAmountOut: executedTotal, executedTotalSimulated: true, aetherFeeBps: Number(aetherFeeBps()) }
+          : netSplit(fullSplit)
+        showSplit(finalSplit, { final: true })
         // Teach the local estimator what this direction actually pays, so the next
         // keystroke can be answered instantly instead of waiting for another scan.
         calibrateLocal({
           tokenIn, tokenOut,
           amountIn: BigInt(amountRaw),
-          engineOut: BigInt(executedTotal ?? fullSplit.totalAmountOut ?? 0n),
+          engineOut: BigInt(finalSplit.totalAmountOut ?? 0n),
         })
         // Same-instant winner check: our final number just landed — refresh the API reference
         // if the one in hand predates it by more than the freshness window (an in-flight fetch

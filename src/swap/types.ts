@@ -114,6 +114,8 @@ export type Quote = {
   /** Routes that shared a pool were collapsed so the total isn't double-counted. */
   sharedPoolsMerged?: number;
   executedTotalSimulated?: boolean;
+  /** Aether's protocol fee in bps, already taken out of `totalAmountOut`. 0 when none applies. */
+  aetherFeeBps?: number;
   /** Locally computed stand-in shown before the engine's first real split lands. */
   provisional?: boolean;
   /** Set once the FULL scan has landed (the fast first paint and local estimates are not final). */

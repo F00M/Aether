@@ -3,6 +3,7 @@
 import { encodeFunctionData, encodePacked, encodeAbiParameters } from 'viem'
 import { UNIVERSAL_ROUTER, resolveAddress, resolveCurrency, routeExecutionKey } from './quoteEngine'
 import { AETHER_AGGREGATOR, DIRECT_POOL_LEGS, V2_ROUTER } from './quoteConfig'
+import { netOfAetherFee } from './aetherFee'
 import { TOKENS, getToken } from '../config/tokens'
 
 const SLIPPAGE_OPTIONS   = ['0.1', '0.5', '1.0']
@@ -759,7 +760,8 @@ function slippageBps(slippageValue) {
 }
 
 function subsetMinOut(routes, tokenOut, slippageValue) {
-  const totalOut = routes.reduce((sum, route) => sum + BigInt(route.amountOut ?? 0), 0n)
+  // The contract checks the minimum against what the recipient gets, after the protocol fee.
+  const totalOut = netOfAetherFee(routes.reduce((sum, route) => sum + BigInt(route.amountOut ?? 0), 0n))
   const bps = slippageBps(slippageValue)
   return totalOut * (10000n - bps) / 10000n
 }
