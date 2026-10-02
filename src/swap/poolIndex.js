@@ -18,7 +18,8 @@ import {
   V2_FACTORY,
   WETH,
 } from './quoteConfig'
-import { discoverV4PoolsForCurrency, fetchEventLogs, getLatestBlockNumber } from './quoteProviders'
+import { toEventSelector } from 'viem'
+import { addressTopic, discoverV4PoolsForCurrency, fetchRawLogs, getLatestBlockNumber } from './quoteProviders'
 import { FEED_RECENT_BLOCKS, feedNeighbors, loadPoolFeed } from './poolFeed'
 import { screenCorridors } from './corridorScreen'
 import { bridgeTokens } from './autoHubs'
@@ -42,6 +43,11 @@ const V2_PAIR_CREATED_EVENT = {
     { name: 'allPairsLength', type: 'uint256', indexed: false },
   ],
 }
+
+const TOPIC_V3_POOL_CREATED = toEventSelector(V3_POOL_CREATED_EVENT)
+const TOPIC_V2_PAIR_CREATED = toEventSelector(V2_PAIR_CREATED_EVENT)
+// token0 and token1 are the first two indexed fields of both events.
+const pairOf = log => (log?.topics?.length >= 3 ? [`0x${log.topics[1].slice(26)}`, `0x${log.topics[2].slice(26)}`] : null)
 
 const INDEX_STORE_KEY = 'aether_pool_index_v1'
 // First-ever scan asks for the token's FULL history in one query (capable RPCs serve it — the
@@ -103,18 +109,24 @@ async function scanTokenNeighbors(key) {
   if (fromBlock > latest) return { neighbors, complete: true }
   const windowFloor = latest > FACTORY_WINDOW_LOOKBACK ? latest - FACTORY_WINDOW_LOOKBACK : 0n
 
+  // Only the two token addresses are needed, and they are indexed: they are read straight off the
+  // topics (see fetchRawLogs — a busy token has thousands of these logs).
+  const self = addressTopic(key)
+  const scan = (address, topic0, topics) => fetchRawLogs({ address, topic0, topics, fromBlock, toBlock: latest, windowFloor })
   const [v3AsT0, v3AsT1, v2AsT0, v2AsT1] = await Promise.all([
-    fetchEventLogs({ address: POOL_FACTORY, event: V3_POOL_CREATED_EVENT, args: { token0: key }, fromBlock, toBlock: latest, windowFloor }),
-    fetchEventLogs({ address: POOL_FACTORY, event: V3_POOL_CREATED_EVENT, args: { token1: key }, fromBlock, toBlock: latest, windowFloor }),
-    fetchEventLogs({ address: V2_FACTORY, event: V2_PAIR_CREATED_EVENT, args: { token0: key }, fromBlock, toBlock: latest, windowFloor }),
-    fetchEventLogs({ address: V2_FACTORY, event: V2_PAIR_CREATED_EVENT, args: { token1: key }, fromBlock, toBlock: latest, windowFloor }),
+    scan(POOL_FACTORY, TOPIC_V3_POOL_CREATED, [self]),
+    scan(POOL_FACTORY, TOPIC_V3_POOL_CREATED, [null, self]),
+    scan(V2_FACTORY, TOPIC_V2_PAIR_CREATED, [self]),
+    scan(V2_FACTORY, TOPIC_V2_PAIR_CREATED, [null, self]),
   ])
 
   for (const log of [...v3AsT0.logs, ...v3AsT1.logs]) {
-    if (log.args?.token0 && log.args?.token1) addEdge(neighbors, log.args.token0, log.args.token1, key, 1)
+    const pair = pairOf(log)
+    if (pair) addEdge(neighbors, pair[0], pair[1], key, 1)
   }
   for (const log of [...v2AsT0.logs, ...v2AsT1.logs]) {
-    if (log.args?.token0 && log.args?.token1) addEdge(neighbors, log.args.token0, log.args.token1, key, 0)
+    const pair = pairOf(log)
+    if (pair) addEdge(neighbors, pair[0], pair[1], key, 0)
   }
 
   const complete = v3AsT0.complete && v3AsT1.complete && v2AsT0.complete && v2AsT1.complete

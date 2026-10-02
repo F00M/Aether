@@ -1,4 +1,4 @@
-import { createPublicClient, createTransport, numberToHex } from 'viem'
+import { createPublicClient, createTransport, numberToHex, toEventSelector } from 'viem'
 import { sepolia } from 'viem/chains'
 import { erc20Abi, factoryAbi, poolAbi, quoterAbi, v2FactoryAbi, v2PairAbi, v4QuoterAbi } from './quoteAbis'
 import { ETH_ADDRESS, POOL_FACTORY, POOL_MANAGER, QUOTER_V2, V2_FACTORY, V4_QUOTER } from './quoteConfig'
@@ -588,11 +588,12 @@ export async function fetchEventLogs({ address, event, args, fromBlock, toBlock,
 // of a big scan: measured on the pool feed's ~17k creation logs, 2.0s of main thread decoded by
 // viem against 6ms sliced by hand (the page froze for those two seconds on the first quote, and for
 // far longer on a phone). A caller that only wants a few fixed fields reads them off the hex itself.
-export async function fetchRawLogs({ address, topic0, fromBlock, toBlock, windowFloor = fromBlock }) {
+// `topics` filters on the indexed fields after the event's own topic (null = any), see addressTopic.
+export async function fetchRawLogs({ address, topic0, topics = [], fromBlock, toBlock, windowFloor = fromBlock }) {
   if (fromBlock > toBlock) return { logs: [], complete: true }
   const query = (from, to) => client.request({
     method: 'eth_getLogs',
-    params: [{ address, topics: [topic0], fromBlock: numberToHex(from), toBlock: numberToHex(to) }],
+    params: [{ address, topics: [topic0, ...topics], fromBlock: numberToHex(from), toBlock: numberToHex(to) }],
   })
   try {
     return { logs: (await query(fromBlock, toBlock)) ?? [], complete: true }
@@ -611,36 +612,46 @@ export async function fetchRawLogs({ address, topic0, fromBlock, toBlock, window
   }
 }
 
-async function getInitLogs(filterArgs) {
+/** An address as the 32-byte topic an indexed address field is filtered by. */
+export const addressTopic = address => `0x${address.slice(2).toLowerCase().padStart(64, '0')}`
+
+const TOPIC_V4_INITIALIZE = toEventSelector(V4_INITIALIZE_EVENT)
+const topicAddress = topic => `0x${topic.slice(26)}`.toLowerCase()
+const dataWord = (data, index) => data.slice(2 + index * 64, 2 + (index + 1) * 64)
+
+async function getInitLogs(topics) {
   const latest = await getLatestBlockNumber()
   if (latest === 0n) return { logs: [], complete: false }
   const floor = latest > V4_DISCOVERY_LOOKBACK ? latest - V4_DISCOVERY_LOOKBACK : 0n
-  return fetchEventLogs({ address: POOL_MANAGER, event: V4_INITIALIZE_EVENT, args: filterArgs, fromBlock: floor, toBlock: latest })
+  return fetchRawLogs({ address: POOL_MANAGER, topic0: TOPIC_V4_INITIALIZE, topics, fromBlock: floor, toBlock: latest })
 }
 
 function fetchV4PoolsForCurrency(key, currency) {
   let scan = v4InflightCache.get(key)
   if (!scan) {
     scan = (async () => {
-      // currency0/currency1 are indexed; query both positions to find every pool touching it.
+      // currency0/currency1 are indexed (topics 2 and 3, after the pool id); query both positions
+      // to find every pool touching it. The logs are read as raw hex, see fetchRawLogs.
       const [asC0, asC1] = await Promise.all([
-        getInitLogs({ currency0: currency }),
-        getInitLogs({ currency1: currency }),
+        getInitLogs([null, addressTopic(currency)]),
+        getInitLogs([null, null, addressTopic(currency)]),
       ])
       const pools = []
       const seen = new Set()
       for (const log of [...asC0.logs, ...asC1.logs]) {
-        const a = log.args
+        // data = fee, tickSpacing, hooks, sqrtPriceX96, tick: one 32-byte word each.
+        if (log?.topics?.length !== 4 || !(log.data?.length >= 2 + 5 * 64)) continue
         // Only no-hook pools: the swap path settles with hookData '0x' and can't drive arbitrary hooks.
-        if (!a || a.hooks?.toLowerCase() !== ETH_ADDRESS) continue
-        const c0 = a.currency0
-        const c1 = a.currency1
-        const fee = Number(a.fee)
-        const tickSpacing = Number(a.tickSpacing)
-        const id = `evt_${c0.toLowerCase()}_${c1.toLowerCase()}_${fee}_${tickSpacing}`
+        if (`0x${dataWord(log.data, 2).slice(24)}` !== ETH_ADDRESS) continue
+        const c0 = topicAddress(log.topics[2])
+        const c1 = topicAddress(log.topics[3])
+        const fee = parseInt(dataWord(log.data, 0).slice(-8), 16)
+        // `| 0` restores the sign of a sign-extended int24.
+        const tickSpacing = parseInt(dataWord(log.data, 1).slice(-8), 16) | 0
+        const id = `evt_${c0}_${c1}_${fee}_${tickSpacing}`
         if (seen.has(id)) continue
         seen.add(id)
-        pools.push({ id, currency0: c0, currency1: c1, fee, tickSpacing, hooks: a.hooks, token0IsEth: c0.toLowerCase() === ETH_ADDRESS })
+        pools.push({ id, currency0: c0, currency1: c1, fee, tickSpacing, hooks: ETH_ADDRESS, token0IsEth: c0 === ETH_ADDRESS })
       }
       return { pools, complete: asC0.complete && asC1.complete }
     })()
