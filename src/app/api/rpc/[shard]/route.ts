@@ -1,11 +1,13 @@
 import { isCrossSite, isRateLimited, json } from "@/lib/api-proxy";
+import { rpcUpstreams } from "@/lib/rpc-upstreams";
 
 /**
  * POST /api/rpc/<shard> — server-side proxy for the Sepolia RPC endpoints.
  *
  * On a public deployment the endpoint list cannot be NEXT_PUBLIC_*: Next inlines those into the
  * client bundle, so anyone could read the keys and spend the quota. The browser therefore talks to
- * this route and the keys stay in SEPOLIA_RPC_URLS on the server.
+ * this route and the keys stay on the server, in SEPOLIA_RPC_URLS and SEPOLIA_RPC_KEYS (see
+ * lib/rpc-upstreams.js).
  *
  * The quote engine spreads one burst of calls across several endpoints in parallel (see
  * quoteProviders.js). It keeps doing that here: each `<shard>` maps to its own upstream, so
@@ -56,12 +58,13 @@ const ALLOWED_METHODS = new Set([
 ]);
 
 function upstreams(): string[] {
-  const configured = process.env.SEPOLIA_RPC_URLS || process.env.NEXT_PUBLIC_SEPOLIA_RPC_URLS || "";
-  const list = configured
-    .split(",")
-    .map((url) => url.trim())
-    // Relative entries are this proxy's own paths — following them would loop back here.
-    .filter((url) => /^https?:\/\//.test(url));
+  const configured = rpcUpstreams(process.env);
+  // NEXT_PUBLIC_SEPOLIA_RPC_URLS is the pre-proxy name, still honoured when it holds real URLs.
+  const candidates = configured.length
+    ? configured
+    : (process.env.NEXT_PUBLIC_SEPOLIA_RPC_URLS || "").split(",").map((url) => url.trim());
+  // Relative entries are this proxy's own paths — following them would loop back here.
+  const list = candidates.filter((url) => /^https?:\/\//.test(url));
   return list.length ? list : [PUBLIC_FALLBACK];
 }
 

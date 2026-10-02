@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // RPC health check — `npm run rpc:health` (add `-- --verbose` for raw error text).
 //
-// Probes every endpoint the quote engine can use — SEPOLIA_RPC_URLS (and the NEXT_PUBLIC_ ones,
-// when those still hold real URLs) from .env.local (or .env) plus the app's public fallbacks — the
-// same way the engine uses them: chain id, head freshness, eth_call, JSON-RPC batching, and
-// eth_getLogs at the ranges pool discovery needs. Keys are never printed, only the provider host
-// and the last 4 characters of the URL.
+// Probes every endpoint the quote engine can use — SEPOLIA_RPC_URLS and SEPOLIA_RPC_KEYS (and the
+// NEXT_PUBLIC_ ones, when those still hold real URLs) from .env.local (or .env) plus the app's
+// public fallbacks — the same way the engine uses them: chain id, head freshness, eth_call,
+// JSON-RPC batching, and eth_getLogs at the ranges pool discovery needs. Keys are never printed,
+// only the endpoint's domain and the last 4 characters of the URL.
 import { readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { rpcUpstreams, unusedRpcKeys } from '../src/lib/rpc-upstreams.js'
 import { PUBLIC_FALLBACKS } from '../src/swap/rpcEndpoints.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -36,7 +37,7 @@ function readEnv() {
 
 const env = readEnv()
 const configured = [
-  ...(env.SEPOLIA_RPC_URLS ?? '').split(','),
+  ...rpcUpstreams(env),
   ...(env.NEXT_PUBLIC_SEPOLIA_RPC_URLS ?? '').split(','),
   env.NEXT_PUBLIC_SEPOLIA_RPC_URL ?? '',
 ]
@@ -164,6 +165,11 @@ async function pool(items, size, fn) {
     }
   }))
   return results
+}
+
+const skippedKeys = unusedRpcKeys(env)
+if (skippedKeys) {
+  console.warn(`\nSEPOLIA_RPC_KEYS holds ${skippedKeys} key(s) but SEPOLIA_RPC_KEY_URL is not set, so they are not used.`)
 }
 
 const results = await pool(urls, 8, probe)
