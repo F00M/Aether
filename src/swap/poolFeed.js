@@ -135,7 +135,14 @@ function persistRaw(raw) {
 
 // ------------------------------------------------------------------ indexes
 
-function buildSnapshot(raw) {
+// Rows indexed between two pauses when the build is allowed to breathe.
+const BUILD_SLICE = 2_500
+
+// The index is built by a generator so the same code serves two callers: the stored copy is
+// indexed in one go (its readers are synchronous), while a freshly scanned feed — ~17k pools on a
+// first visit — is indexed a slice at a time, with the browser free to paint in between.
+function* indexRows(raw) {
+  let indexed = 0
   const v4ByCurrency = new Map()   // currency (0x0 kept as ETH) -> V4 pool objects
   const edges = new Map()          // graph node -> Map(neighbor -> { v2, v3, v4, last })
   const v3ByPair = new Map()       // 'a-b' (sorted) -> [{ fee, pool, block }]
@@ -173,6 +180,7 @@ function buildSnapshot(raw) {
       else v4ByCurrency.set(currency, [pool])
     }
     addEdge(c0, c1, 'v4', block)
+    if (++indexed % BUILD_SLICE === 0) yield
   }
 
   for (const [t0, t1, fee, pool, block] of raw.v3) {
@@ -182,11 +190,13 @@ function buildSnapshot(raw) {
     if (list) list.push(row)
     else v3ByPair.set(key, [row])
     addEdge(t0, t1, 'v3', block)
+    if (++indexed % BUILD_SLICE === 0) yield
   }
 
   for (const [t0, t1, pair, block] of raw.v2) {
     v2ByPair.set(pairKey(t0, t1), { pair, block })
     addEdge(t0, t1, 'v2', block)
+    if (++indexed % BUILD_SLICE === 0) yield
   }
 
   return {
@@ -197,6 +207,23 @@ function buildSnapshot(raw) {
     v3ByPair,
     v2ByPair,
   }
+}
+
+function buildSnapshot(raw) {
+  const steps = indexRows(raw)
+  let step = steps.next()
+  while (!step.done) step = steps.next()
+  return step.value
+}
+
+async function buildSnapshotInSlices(raw) {
+  const steps = indexRows(raw)
+  let step = steps.next()
+  while (!step.done) {
+    await breathe()
+    step = steps.next()
+  }
+  return step.value
 }
 
 const pairKey = (a, b) => {
@@ -281,12 +308,17 @@ function seenRows() {
   return seen
 }
 
-/** Adds the pools these logs announce that the feed doesn't have yet; returns how many were new. */
-function mergeLogs({ v4Logs, v3Logs, v2Logs }) {
+/**
+ * Adds the pools these logs announce that the feed doesn't have yet; resolves to how many were new.
+ * A first visit reads ~17k logs at once, so it pauses between slices like the index build does.
+ */
+async function mergeLogs({ v4Logs, v3Logs, v2Logs }) {
   const known = seenRows()
   let added = 0
-  const take = (logs, toRow, keyOf, rows, set) => {
+  let read = 0
+  const take = async (logs, toRow, keyOf, rows, set) => {
     for (const log of logs) {
+      if (++read % BUILD_SLICE === 0) await breathe()
       const row = toRow(log)
       if (!row) continue
       const key = keyOf(row)
@@ -296,9 +328,9 @@ function mergeLogs({ v4Logs, v3Logs, v2Logs }) {
       added++
     }
   }
-  take(v4Logs, v4Row, v4Key, raw.v4, known.v4)
-  take(v3Logs, v3Row, row => row[3], raw.v3, known.v3)
-  take(v2Logs, v2Row, row => row[2], raw.v2, known.v2)
+  await take(v4Logs, v4Row, v4Key, raw.v4, known.v4)
+  await take(v3Logs, v3Row, row => row[3], raw.v3, known.v3)
+  await take(v2Logs, v2Row, row => row[2], raw.v2, known.v2)
   return added
 }
 
@@ -339,7 +371,7 @@ async function refreshFeed() {
   // Partial logs are still merged (dedupe makes a later re-scan of the same range harmless), but
   // the watermark only advances on a COMPLETE scan so a dropped window is re-read next refresh
   // instead of becoming a permanent hole.
-  const added = mergeLogs({ v4Logs: v4.logs, v3Logs: v3.logs, v2Logs: v2.logs })
+  const added = await mergeLogs({ v4Logs: v4.logs, v3Logs: v3.logs, v2Logs: v2.logs })
   const complete = v4.complete && v3.complete && v2.complete
   if (complete) raw.to = Number(latest)
 
@@ -349,7 +381,7 @@ async function refreshFeed() {
   // reload re-reads the gap in a single small getLogs).
   if (added > 0 || !snapshot) {
     await breathe()
-    snapshot = buildSnapshot(raw)
+    snapshot = await buildSnapshotInSlices(raw)
   } else if (snapshot.toBlock !== raw.to) {
     snapshot = { ...snapshot, toBlock: raw.to }
   }
