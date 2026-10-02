@@ -12,21 +12,22 @@
 // reach the screen or the chain.
 import { FEE_TIERS, ETH_ADDRESS, POOL_FACTORY, QUOTER_V2, V2_FACTORY, V4_QUOTER, WETH } from './quoteConfig'
 import { client, overRouteGasBudget } from './quoteProviders'
-import { factoryAbi, poolAbi, quoterAbi, v2FactoryAbi, v2PairAbi, v4QuoterAbi } from './quoteAbis'
+import { quoterAbi, v4QuoterAbi } from './quoteAbis'
 import { v2AmountOut, v3AmountOut, v4PoolId } from './localQuote'
 import { feedV2Pair, feedV3Pools, feedV4PoolsFor } from './poolFeed'
+import { addressWord, readCalls, resultWord, selector, uintWord } from './multicall3'
 
 const STATE_VIEW = '0xE1Dd9c3fA50EDB962E442f60DfBc432e24537E4C'
-const stateViewAbi = [
-  { name: 'getSlot0', type: 'function', stateMutability: 'view', inputs: [{ type: 'bytes32' }],
-    outputs: [{ type: 'uint160' }, { type: 'int24' }, { type: 'uint24' }, { type: 'uint24' }] },
-  { name: 'getLiquidity', type: 'function', stateMutability: 'view', inputs: [{ type: 'bytes32' }],
-    outputs: [{ type: 'uint128' }] },
-]
-const v3PoolAbi = [
-  ...poolAbi,
-  { name: 'liquidity', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint128' }] },
-]
+// The reads the screen makes by the thousand (see multicall3.js), and how many 32-byte words each
+// answers with — a shorter answer is not that contract and is treated as a failed call.
+const GET_PAIR = selector('function getPair(address,address)')
+const GET_POOL = selector('function getPool(address,address,uint24)')
+const GET_RESERVES = selector('function getReserves()')
+const SLOT0 = selector('function slot0()')
+const LIQUIDITY = selector('function liquidity()')
+const GET_SLOT0 = selector('function getSlot0(bytes32)')
+const GET_LIQUIDITY = selector('function getLiquidity(bytes32)')
+const WORDS = { address: 1, reserves: 3, slot0: 7, v4Slot0: 4, liquidity: 1 }
 
 // Screen at a slice of the trade: a corridor usually takes a share of a split, and the in-range
 // math is only honest while the amount is small against the pool's visible depth.
@@ -43,8 +44,6 @@ const V3_TICK_SPACING = { 100: 1, 500: 10, 3000: 60, 10000: 200 }
 // Same guard as localQuote: a pool whose in-range depth isn't 10x the input is priced at a
 // fantasy rate (a drained pool parked off-market quotes GREAT and pays nothing).
 const DEPTH_SAFETY = 10n
-// Bytes of calldata per Multicall3 chunk. viem's 1KB default splits ~5 lookups per eth_call.
-const MULTICALL_BATCH_BYTES = 16_384
 const STATE_TTL_MS = 12_000
 const NEGATIVE_TTL_MS = 60_000
 
@@ -69,22 +68,9 @@ function poolIdOf(pool) {
 // that held the main thread long enough to feel while scrolling or typing.
 const breathe = () => new Promise(resolve => setTimeout(resolve, 0))
 const LEG_SLICE = 100
-const CALL_SLICE = 800
 
-// client.multicall encodes every call and decodes every result in one go, so a large read goes out
-// a slice at a time. A slice that fails leaves its results undefined; the others still count.
-async function multicallInSlices(contracts) {
-  const parts = []
-  for (let i = 0; i < contracts.length; i += CALL_SLICE) {
-    if (i) await breathe()
-    const slice = contracts.slice(i, i + CALL_SLICE)
-    parts.push(
-      client.multicall({ contracts: slice, allowFailure: true, batchSize: MULTICALL_BATCH_BYTES })
-        .catch(() => Array.from({ length: slice.length })),
-    )
-  }
-  return (await Promise.all(parts)).flat()
-}
+// A call answered with at least `words` 32-byte words.
+const answered = (result, words) => Boolean(result?.success) && result.data.length >= words * 64
 
 // ---------------------------------------------------------------- pool addresses
 
@@ -106,24 +92,24 @@ async function resolveV2V3Pools(edges, feed) {
     const [x, y] = [a, b].sort()
     const v2Key = `v2|${x}-${y}`
     if (cachedAddress(v2Key) === undefined && !feedV2Pair(feed, a, b)) {
-      lookups.push({ key: v2Key, call: { address: V2_FACTORY, abi: v2FactoryAbi, functionName: 'getPair', args: [a, b] } })
+      lookups.push({ key: v2Key, target: V2_FACTORY, data: GET_PAIR + addressWord(a) + addressWord(b) })
     }
     for (const fee of FEE_TIERS) {
       const v3Key = `v3|${x}-${y}|${fee}`
       if (cachedAddress(v3Key) === undefined && !feedV3Pools(feed, a, b).some(p => p.fee === fee)) {
-        lookups.push({ key: v3Key, call: { address: POOL_FACTORY, abi: factoryAbi, functionName: 'getPool', args: [a, b, fee] } })
+        lookups.push({ key: v3Key, target: POOL_FACTORY, data: GET_POOL + addressWord(a) + addressWord(b) + uintWord(fee) })
       }
     }
   }
   const unique = [...new Map(lookups.map(l => [l.key, l])).values()]
   if (unique.length) {
-    const results = await multicallInSlices(unique.map(l => l.call))
+    const results = await readCalls(unique)
     unique.forEach((l, i) => {
       const r = results[i]
       // A failed call is a transport problem, not an answer — leave it uncached so it's retried.
-      if (r?.status !== 'success') return
-      const address = r.result && lower(r.result) !== ETH_ADDRESS ? lower(r.result) : null
-      addressCache.set(l.key, { address, at: Date.now() })
+      if (!answered(r, WORDS.address)) return
+      const found = `0x${r.data.slice(24, 64)}`.toLowerCase()
+      addressCache.set(l.key, { address: found !== ETH_ADDRESS ? found : null, at: Date.now() })
     })
   }
 }
@@ -182,30 +168,29 @@ async function fetchStates(pools) {
     for (const p of missing) {
       const at = calls.length
       if (p.kind === 0) {
-        calls.push({ address: p.address, abi: v2PairAbi, functionName: 'getReserves' })
-        slots.push({ p, at, liq: -1 })
+        calls.push({ target: p.address, data: GET_RESERVES })
+        slots.push({ p, at, liq: -1, words: WORDS.reserves })
       } else if (p.kind === 1) {
-        calls.push({ address: p.address, abi: v3PoolAbi, functionName: 'slot0' })
-        calls.push({ address: p.address, abi: v3PoolAbi, functionName: 'liquidity' })
-        slots.push({ p, at, liq: at + 1 })
+        calls.push({ target: p.address, data: SLOT0 })
+        calls.push({ target: p.address, data: LIQUIDITY })
+        slots.push({ p, at, liq: at + 1, words: WORDS.slot0 })
       } else {
-        calls.push({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [p.poolId] })
-        calls.push({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getLiquidity', args: [p.poolId] })
-        slots.push({ p, at, liq: at + 1 })
+        calls.push({ target: STATE_VIEW, data: GET_SLOT0 + p.poolId.slice(2) })
+        calls.push({ target: STATE_VIEW, data: GET_LIQUIDITY + p.poolId.slice(2) })
+        slots.push({ p, at, liq: at + 1, words: WORDS.v4Slot0 })
       }
     }
-    const results = await multicallInSlices(calls)
-    const ok = i => i >= 0 && results[i]?.status === 'success'
-    for (const { p, at, liq } of slots) {
-      if (!ok(at)) continue
+    const results = await readCalls(calls)
+    for (const { p, at, liq, words } of slots) {
+      if (!answered(results[at], words)) continue
       let state = null
       if (p.kind === 0) {
-        const [r0, r1] = results[at].result
-        if (BigInt(r0) > 0n && BigInt(r1) > 0n) state = { reserve0: BigInt(r0), reserve1: BigInt(r1) }
-      } else if (ok(liq)) {
-        const slot0 = results[at].result
-        const sqrtPriceX96 = BigInt(Array.isArray(slot0) ? slot0[0] : slot0)
-        const liquidity = BigInt(results[liq].result)
+        const reserve0 = resultWord(results[at].data, 0)
+        const reserve1 = resultWord(results[at].data, 1)
+        if (reserve0 > 0n && reserve1 > 0n) state = { reserve0, reserve1 }
+      } else if (answered(results[liq], WORDS.liquidity)) {
+        const sqrtPriceX96 = resultWord(results[at].data, 0)
+        const liquidity = resultWord(results[liq].data, 0)
         if (sqrtPriceX96 > 0n && liquidity > 0n) state = { sqrtPriceX96, liquidity }
       }
       // `null` = read fine, pool is empty — cache it too, so an empty pool isn't re-read per quote.
