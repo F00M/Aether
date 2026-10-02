@@ -1127,7 +1127,9 @@ export function SwapCard() {
   // follow the selection so the number on screen is never another venue's.
   const activeOut = useMemo(() => {
     if (!quote) return null;
-    const amountInNum = parseFloat(amountIn);
+    // The quote's own amount: while a new amount is being quoted, the previous quote is still on
+    // screen, and dividing its output by the new input showed a rate that never existed.
+    const amountInNum = parseFloat(quote.amountIn ?? amountIn);
     const fromRaw = (raw: string) => Number(raw) / 10 ** tokenOut.decimals;
     if (lifiActive && lifiQuote) {
       const out = fromRaw(lifiQuote.amountOut);

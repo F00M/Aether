@@ -96,6 +96,10 @@ export type Quote = {
   amountOutFormatted: string;
   minOutFormatted: string;
   rate: string;
+  /** The input amount this quote answers, as typed. The field may already hold a newer one. */
+  amountIn?: string;
+  /** The quote run that produced this; another venue's answer only joins its own run's quote. */
+  runId?: number;
   fee: number;
   priceImpact: number;
   priceImpactPct: string;

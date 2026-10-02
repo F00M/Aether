@@ -70,6 +70,7 @@ function buildLocalQuote({ local, tokenIn, tokenOut, amountIn, slippage }) {
     amountOutFormatted: amountOutNum.toFixed(6),
     minOutFormatted: (amountOutNum * (1 - slip)).toFixed(6),
     rate: (amountOutNum / parseFloat(amountIn)).toFixed(6),
+    amountIn,
     fee: local.fee ?? 0,
     priceImpact: 0,
     priceImpactPct: '0.00',
@@ -127,6 +128,7 @@ function buildRouteQuote({ split, apiQuote, lifiQuote, tokenIn, tokenOut, amount
     amountOutFormatted: amountOutNum.toFixed(6),
     minOutFormatted: (amountOutNum * (1 - slip)).toFixed(6),
     rate: (amountOutNum / parseFloat(amountIn)).toFixed(6),
+    amountIn,
     fee: split.routes.length > 0
       ? split.routes.reduce((best, route) => route.percent > best.percent ? route : best, split.routes[0]).fee
       : 0,
@@ -327,7 +329,7 @@ export function useQuote({ tokenIn, tokenOut, amountIn, slippage, swapper, block
             // `calibrated` gates the display: an unlearned direction is ~17% off,
             // and a number that visibly jumps on every scan is worse than a spinner.
             if (!local?.calibrated || !isCurrentRun() || hadDisplay) return
-            setQuote(buildLocalQuote({ local, tokenIn, tokenOut, amountIn, slippage }))
+            setQuote({ ...buildLocalQuote({ local, tokenIn, tokenOut, amountIn, slippage }), runId: runSeq })
           })
           .catch(() => {})
 
@@ -356,8 +358,10 @@ export function useQuote({ tokenIn, tokenOut, amountIn, slippage, swapper, block
         }
         requestApiQuote()
 
-        // LI.FI runs alongside, attaches whenever it lands, and is compared against whatever
-        // Aether number is on screen at that moment (and again when each new split lands).
+        // LI.FI runs alongside, attaches whenever it lands, and is compared against the Aether
+        // number this run has on screen at that moment (and again when each new split lands). It
+        // never joins the previous amount's quote, which stays up until this run's first split:
+        // an answer for the new amount next to the old one's output is a rate that doesn't exist.
         let latestLifiQuote = null
         let lifiInFlight = false
         const requestLifiQuote = () => {
@@ -367,7 +371,7 @@ export function useQuote({ tokenIn, tokenOut, amountIn, slippage, swapper, block
               lifiInFlight = false
               if (!isCurrentRun()) return
               latestLifiQuote = lifiQuote
-              setQuote(current => attachLifiQuote(current, lifiQuote, tokenOut))
+              setQuote(current => (current?.runId === runSeq ? attachLifiQuote(current, lifiQuote, tokenOut) : current))
             })
             .catch(() => { lifiInFlight = false })
         }
@@ -381,6 +385,7 @@ export function useQuote({ tokenIn, tokenOut, amountIn, slippage, swapper, block
               split, apiQuote: latestApiQuote, lifiQuote: latestLifiQuote, tokenIn, tokenOut, amountIn, slippage,
             }),
             final,
+            runId: runSeq,
           }
           if (isCurrentRun()) {
             hadDisplay = true
