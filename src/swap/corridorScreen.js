@@ -49,7 +49,42 @@ const STATE_TTL_MS = 12_000
 const NEGATIVE_TTL_MS = 60_000
 
 const lower = address => address.toLowerCase()
-const node = address => (lower(address) === ETH_ADDRESS ? lower(WETH) : lower(address))
+const WETH_NODE = lower(WETH)
+const node = address => {
+  const key = lower(address)
+  return key === ETH_ADDRESS ? WETH_NODE : key
+}
+
+// A pool's id is a hash of its key and never changes. Pool objects live as long as the feed
+// snapshot does, so the id is worked out once per pool rather than once per quote.
+const poolIds = new WeakMap()
+function poolIdOf(pool) {
+  let id = poolIds.get(pool)
+  if (!id) poolIds.set(pool, (id = v4PoolId(pool)))
+  return id
+}
+
+// A quote screens a few dozen candidates and fits in one slice. Hub detection screens every token
+// paired with both anchors (hundreds, thousands of pools) in the background, and without pauses
+// that held the main thread long enough to feel while scrolling or typing.
+const breathe = () => new Promise(resolve => setTimeout(resolve, 0))
+const LEG_SLICE = 100
+const CALL_SLICE = 800
+
+// client.multicall encodes every call and decodes every result in one go, so a large read goes out
+// a slice at a time. A slice that fails leaves its results undefined; the others still count.
+async function multicallInSlices(contracts) {
+  const parts = []
+  for (let i = 0; i < contracts.length; i += CALL_SLICE) {
+    if (i) await breathe()
+    const slice = contracts.slice(i, i + CALL_SLICE)
+    parts.push(
+      client.multicall({ contracts: slice, allowFailure: true, batchSize: MULTICALL_BATCH_BYTES })
+        .catch(() => Array.from({ length: slice.length })),
+    )
+  }
+  return (await Promise.all(parts)).flat()
+}
 
 // ---------------------------------------------------------------- pool addresses
 
@@ -82,9 +117,7 @@ async function resolveV2V3Pools(edges, feed) {
   }
   const unique = [...new Map(lookups.map(l => [l.key, l])).values()]
   if (unique.length) {
-    const results = await client.multicall({
-      contracts: unique.map(l => l.call), allowFailure: true, batchSize: MULTICALL_BATCH_BYTES,
-    }).catch(() => [])
+    const results = await multicallInSlices(unique.map(l => l.call))
     unique.forEach((l, i) => {
       const r = results[i]
       // A failed call is a transport problem, not an answer — leave it uncached so it's retried.
@@ -96,7 +129,7 @@ async function resolveV2V3Pools(edges, feed) {
 }
 
 // `a` and `b` are graph nodes (lowercase, ETH folded into WETH).
-function poolsForEdge(a, b, feed) {
+export function poolsForEdge(a, b, feed) {
   const pools = []
   const [x, y] = [a, b].sort()
   const token0 = x
@@ -114,12 +147,19 @@ function poolsForEdge(a, b, feed) {
     }
   }
 
-  for (const pool of feedV4PoolsFor(feed, a)) {
-    const other = node(pool.currency0) === a ? node(pool.currency1) : node(pool.currency0)
-    if (other !== b) continue
-    const poolId = v4PoolId(pool)
+  // A pool between a and b is in both tokens' lists, so the shorter one is walked. WETH's list is
+  // nearly every V4 pool there is (~10k); walking it once per transit candidate was most of a
+  // quote's main-thread time, and the candidate's own list is a handful.
+  const fromA = feedV4PoolsFor(feed, a)
+  const fromB = feedV4PoolsFor(feed, b)
+  const [list, far] = fromA.length <= fromB.length ? [fromA, b] : [fromB, a]
+  for (const pool of list) {
+    const node0 = node(pool.currency0)
+    const node1 = node(pool.currency1)
+    if (node0 !== far && node1 !== far) continue
+    const poolId = poolIdOf(pool)
     pools.push({
-      kind: 2, key: `2:${poolId}`, poolId, token0: node(pool.currency0),
+      kind: 2, key: `2:${poolId}`, poolId, token0: node0,
       fee: Number(pool.fee), tickSpacing: Number(pool.tickSpacing), v4: pool,
     })
   }
@@ -154,8 +194,7 @@ async function fetchStates(pools) {
         slots.push({ p, at, liq: at + 1 })
       }
     }
-    const results = await client.multicall({ contracts: calls, allowFailure: true, batchSize: MULTICALL_BATCH_BYTES })
-      .catch(() => [])
+    const results = await multicallInSlices(calls)
     const ok = i => i >= 0 && results[i]?.status === 'success'
     for (const { p, at, liq } of slots) {
       if (!ok(at)) continue
@@ -264,7 +303,11 @@ export async function screenCorridors({ addrIn, addrOut, amountRaw, candidates, 
   await resolveV2V3Pools(edgeList, feed)
 
   const direct = poolsForEdge(a, b, feed)
-  const legs = xs.map(x => ({ x, first: poolsForEdge(a, x, feed), second: poolsForEdge(x, b, feed) }))
+  const legs = []
+  for (const x of xs) {
+    if (legs.length && legs.length % LEG_SLICE === 0) await breathe()
+    legs.push({ x, first: poolsForEdge(a, x, feed), second: poolsForEdge(x, b, feed) })
+  }
   const states = await fetchStates([...direct, ...legs.flatMap(l => [...l.first, ...l.second])])
 
   const localOut = (leg, guarded) => {
