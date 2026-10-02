@@ -63,11 +63,25 @@ function poolIdOf(pool) {
   return id
 }
 
-// A quote screens a few dozen candidates and fits in one slice. Hub detection screens every token
-// paired with both anchors (hundreds, thousands of pools) in the background, and without pauses
-// that held the main thread long enough to feel while scrolling or typing.
+// A screen is a few loops over every candidate's pools. Hub detection runs them over every token
+// paired with both anchors (thousands of pools) in the background, and without pauses that held
+// the main thread long enough to feel while scrolling or typing. The pauses are timed rather than
+// counted: a slow phone takes more of them, and a quote's few dozen candidates on a fast machine
+// take none.
 const breathe = () => new Promise(resolve => setTimeout(resolve, 0))
-const LEG_SLICE = 100
+const SLICE_MS = 8
+function pacer() {
+  let since = performance.now()
+  return {
+    due: () => performance.now() - since >= SLICE_MS,
+    async rest() {
+      await breathe()
+      since = performance.now()
+    },
+    // After waiting on the network: that time was not spent holding the thread.
+    restart() { since = performance.now() },
+  }
+}
 
 // A call answered with at least `words` 32-byte words.
 const answered = (result, words) => Boolean(result?.success) && result.data.length >= words * 64
@@ -86,9 +100,10 @@ function cachedAddress(key) {
   return hit.address
 }
 
-async function resolveV2V3Pools(edges, feed) {
+async function resolveV2V3Pools(edges, feed, pace) {
   const lookups = []
   for (const { a, b } of edges) {
+    if (pace.due()) await pace.rest()
     const [x, y] = [a, b].sort()
     const v2Key = `v2|${x}-${y}`
     if (cachedAddress(v2Key) === undefined && !feedV2Pair(feed, a, b)) {
@@ -104,6 +119,7 @@ async function resolveV2V3Pools(edges, feed) {
   const unique = [...new Map(lookups.map(l => [l.key, l])).values()]
   if (unique.length) {
     const results = await readCalls(unique)
+    pace.restart()
     unique.forEach((l, i) => {
       const r = results[i]
       // A failed call is a transport problem, not an answer — leave it uncached so it's retried.
@@ -156,7 +172,7 @@ export function poolsForEdge(a, b, feed) {
 
 const stateCache = new Map()   // pool key -> { at, state }
 
-async function fetchStates(pools) {
+async function fetchStates(pools, pace) {
   const fresh = key => {
     const hit = stateCache.get(key)
     return hit && Date.now() - hit.at <= STATE_TTL_MS ? hit.state : undefined
@@ -166,6 +182,7 @@ async function fetchStates(pools) {
     const calls = []
     const slots = []
     for (const p of missing) {
+      if (pace.due()) await pace.rest()
       const at = calls.length
       if (p.kind === 0) {
         calls.push({ target: p.address, data: GET_RESERVES })
@@ -181,7 +198,9 @@ async function fetchStates(pools) {
       }
     }
     const results = await readCalls(calls)
+    pace.restart()
     for (const { p, at, liq, words } of slots) {
+      if (pace.due()) await pace.rest()
       if (!answered(results[at], words)) continue
       let state = null
       if (p.kind === 0) {
@@ -284,31 +303,35 @@ export async function screenCorridors({ addrIn, addrOut, amountRaw, candidates, 
   const probe = BigInt(amountRaw) / SCREEN_SHARE_DIVISOR || 1n
   const xs = [...new Set(candidates.map(node))].filter(x => x !== a && x !== b)
 
+  const pace = pacer()
   const edgeList = [{ a, b }, ...xs.flatMap(x => [{ a, b: x }, { a: x, b }])]
-  await resolveV2V3Pools(edgeList, feed)
+  await resolveV2V3Pools(edgeList, feed, pace)
 
   const direct = poolsForEdge(a, b, feed)
   const legs = []
   for (const x of xs) {
-    if (legs.length && legs.length % LEG_SLICE === 0) await breathe()
+    if (pace.due()) await pace.rest()
     legs.push({ x, first: poolsForEdge(a, x, feed), second: poolsForEdge(x, b, feed) })
   }
-  const states = await fetchStates([...direct, ...legs.flatMap(l => [...l.first, ...l.second])])
+  const states = await fetchStates([...direct, ...legs.flatMap(l => [...l.first, ...l.second])], pace)
 
   const localOut = (leg, guarded) => {
     const mid = bestLocalOut(leg.first, states, a, probe, guarded)
     return mid > 0n ? bestLocalOut(leg.second, states, leg.x, mid, guarded) : 0n
   }
-  const local = legs
-    .map(leg => ({ ...leg, out: localOut(leg, true) }))
-    .filter(c => c.out > 0n)
-    .sort(byOutDesc)
+  // Every corridor that pays, best first — with or without the depth rule.
+  const ranked = async guarded => {
+    const paying = []
+    for (const leg of legs) {
+      if (pace.due()) await pace.rest()
+      const out = localOut(leg, guarded)
+      if (out > 0n) paying.push({ ...leg, out })
+    }
+    return paying.sort(byOutDesc)
+  }
+  const local = await ranked(true)
   // Verification set: the trusted leaders, plus the corridors only optimism likes.
-  const optimistic = legs
-    .map(leg => ({ ...leg, out: localOut(leg, false) }))
-    .filter(c => c.out > 0n)
-    .sort(byOutDesc)
-    .slice(0, VERIFY_OPTIMISTIC)
+  const optimistic = (await ranked(false)).slice(0, VERIFY_OPTIMISTIC)
   const toVerify = [...new Map([...local.slice(0, VERIFY_TOP), ...optimistic].map(leg => [leg.x, leg])).values()]
   const verifiedSet = new Set(toVerify.map(leg => leg.x))
 
