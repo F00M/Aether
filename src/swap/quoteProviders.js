@@ -1,4 +1,4 @@
-import { createPublicClient, createTransport } from 'viem'
+import { createPublicClient, createTransport, numberToHex } from 'viem'
 import { sepolia } from 'viem/chains'
 import { erc20Abi, factoryAbi, poolAbi, quoterAbi, v2FactoryAbi, v2PairAbi, v4QuoterAbi } from './quoteAbis'
 import { ETH_ADDRESS, POOL_FACTORY, POOL_MANAGER, QUOTER_V2, V2_FACTORY, V4_QUOTER } from './quoteConfig'
@@ -91,6 +91,32 @@ function fastEndpoints(urls) {
 // Fastest known first, unmeasured after them, benched last.
 const byLatency = urls => [...urls].sort((a, b) => (latencyMs.get(a) ?? 1e6) - (latencyMs.get(b) ?? 1e6))
 
+// ── Which endpoint serves log ranges ────────────────────────────────────────────────────────────
+// Many endpoints refuse an eth_getLogs over more than a handful of blocks (free tiers commonly
+// allow 10) — with HTTP 200 and an error inside, so nothing gets benched — and failover walks the
+// endpoints fastest-first. Measured: EVERY ranged log query bounced off every refusing endpoint,
+// one after another, before reaching the one that serves it — over a second and a lot of paid
+// quota thrown away per query. That was the wait behind the Stats
+// skeleton and most of a cold pool-feed build. The endpoint that serves a range another one
+// has just refused is remembered: the next ranged query goes straight to it. If it ever refuses or
+// fails, it is forgotten and the ordinary walk finds the next one.
+const NARROW_LOG_RANGE = 10n
+let logsServer = null
+function rememberLogsServer(url) {
+  if (logsServer === url) return
+  logsServer = url
+  persistRpcHealth()
+}
+function isRangedLogQuery(method, params) {
+  if (method !== 'eth_getLogs') return false
+  const filter = params?.[0]
+  try {
+    return BigInt(filter.toBlock) - BigInt(filter.fromBlock) > NARROW_LOG_RANGE
+  } catch {
+    return false   // 'latest', a block hash, a missing bound: leave it to the ordinary path
+  }
+}
+
 // Long benches and measured latencies survive a page reload: without this every reload re-learned
 // that 21 endpoints are dead (~1s of failed requests before the first quote) and that two are slow.
 // Keyed by a hash so the stored copy doesn't carry the RPC keys in the URLs.
@@ -113,6 +139,7 @@ function loadRpcHealth(urls) {
         strikes.set(url, 1)
       }
       if (stored.l?.[key] !== undefined) latencyMs.set(url, stored.l[key])
+      if (stored.g && stored.g === key) logsServer = url
     }
   } catch { /* unavailable/corrupt — start fresh */ }
 }
@@ -127,7 +154,7 @@ function persistRpcHealth() {
       for (const [url, until] of benchedUntil) if (until - now >= PERSIST_BENCH_MIN_MS) b[urlHash(url)] = until
       const l = {}
       for (const [url, ms] of latencyMs) l[urlHash(url)] = Math.round(ms)
-      globalThis.localStorage.setItem(RPC_HEALTH_STORE_KEY, JSON.stringify({ at: now, b, l }))
+      globalThis.localStorage.setItem(RPC_HEALTH_STORE_KEY, JSON.stringify({ at: now, b, l, g: logsServer ? urlHash(logsServer) : undefined }))
     } catch { /* quota/unavailable */ }
   }, 2_000)
   persistTimer.unref?.()
@@ -262,7 +289,11 @@ function shardedTransport() {
   // 200, and whole fee tiers (e.g. the live zkLTC 90% pool) stayed invisible.
   async function failoverCalls(items, urls) {
     let remaining = items
-    for (const url of healthyFirst(urls)) {
+    const walk = healthyFirst(urls)
+    const order = logsServer && walk.includes(logsServer) && !isBenched(logsServer)
+      ? [logsServer, ...walk.filter(u => u !== logsServer)]
+      : walk
+    for (const url of order) {
       if (!remaining.length) return
       let responses
       const t0 = Date.now()
@@ -277,6 +308,9 @@ function shardedTransport() {
         if (r && !r.error) it.resolve(r.result)
         else next.push(it)
       }
+      // It served a range another endpoint had refused: that is the one to ask first next time.
+      if (next.length < remaining.length) rememberLogsServer(url)
+      else if (url === logsServer) logsServer = null
       remaining = next
     }
     for (const it of remaining) it.reject(new Error('eth_getLogs failed on all providers'))
@@ -345,6 +379,24 @@ function shardedTransport() {
     groups.forEach((g, gi) => { if (g.length) sendShard(shardUrls[gi], g) })
   }
 
+  function enqueue(item) {
+    queue.push(item)
+    if (queue.length >= SHARD_URLS.length * MAX_PER_SHARD) flush()
+    else if (!timer) timer = setTimeout(flush, BATCH_WAIT_MS)
+  }
+
+  // A ranged log query, sent on its own to the endpoint known to serve ranges. Anything short of
+  // an answer puts it back on the ordinary path, which fails over as it always did.
+  async function sendToLogsServer(item) {
+    const url = logsServer
+    try {
+      const [response] = await postOne(url, [item.payload])
+      if (response && !response.error) return item.resolve(response.result)
+    } catch { /* fall through */ }
+    if (logsServer === url) logsServer = null
+    enqueue(item)
+  }
+
   return () => createTransport({
     key: 'rpc-aggregator', name: 'RPC aggregator (sharded)', type: 'sharded', retryCount: 0,
     async request({ method, params }) {
@@ -353,9 +405,9 @@ function shardedTransport() {
       lastReqAt = now
       scanReqs++
       return new Promise((resolve, reject) => {
-        queue.push({ payload: { jsonrpc: '2.0', id: idSeq++, method, params: params ?? [] }, resolve, reject })
-        if (queue.length >= SHARD_URLS.length * MAX_PER_SHARD) flush()
-        else if (!timer) timer = setTimeout(flush, BATCH_WAIT_MS)
+        const item = { payload: { jsonrpc: '2.0', id: idSeq++, method, params: params ?? [] }, resolve, reject }
+        if (logsServer && !isBenched(logsServer) && isRangedLogQuery(method, item.payload.params)) sendToLogsServer(item)
+        else enqueue(item)
       })
     },
   })
@@ -527,6 +579,34 @@ export async function fetchEventLogs({ address, event, args, fromBlock, toBlock,
         .catch(() => { failed++; return [] })
     ))
     // The windowed fallback only covers back to `windowFloor`: complete relative to that floor.
+    return { logs: results.flat(), complete: failed === 0 }
+  }
+}
+
+// The same fetch, but the logs come back as the RPC sent them: { topics, data, blockNumber (hex) }.
+// viem's decoder checksums every address it decodes — one keccak each — and that is the whole cost
+// of a big scan: measured on the pool feed's ~17k creation logs, 2.0s of main thread decoded by
+// viem against 6ms sliced by hand (the page froze for those two seconds on the first quote, and for
+// far longer on a phone). A caller that only wants a few fixed fields reads them off the hex itself.
+export async function fetchRawLogs({ address, topic0, fromBlock, toBlock, windowFloor = fromBlock }) {
+  if (fromBlock > toBlock) return { logs: [], complete: true }
+  const query = (from, to) => client.request({
+    method: 'eth_getLogs',
+    params: [{ address, topics: [topic0], fromBlock: numberToHex(from), toBlock: numberToHex(to) }],
+  })
+  try {
+    return { logs: (await query(fromBlock, toBlock)) ?? [], complete: true }
+  } catch {
+    const floor = windowFloor > fromBlock ? windowFloor : fromBlock
+    const ranges = []
+    for (let to = toBlock; to > floor; to -= (V4_LOG_WINDOW + 1n)) {
+      const from = to - V4_LOG_WINDOW > floor ? to - V4_LOG_WINDOW : floor
+      ranges.push([from, to])
+    }
+    let failed = 0
+    const results = await Promise.all(ranges.map(([from, to]) =>
+      query(from, to).then(logs => logs ?? []).catch(() => { failed++; return [] })
+    ))
     return { logs: results.flat(), complete: failed === 0 }
   }
 }
