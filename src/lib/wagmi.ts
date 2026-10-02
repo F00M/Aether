@@ -1,4 +1,4 @@
-import { getDefaultConfig, type Wallet } from "@rainbow-me/rainbowkit";
+import { connectorsForWallets, type Wallet } from "@rainbow-me/rainbowkit";
 import {
   baseAccount,
   binanceWallet,
@@ -14,7 +14,7 @@ import {
   trustWallet,
   walletConnectWallet,
 } from "@rainbow-me/rainbowkit/wallets";
-import { http } from "wagmi";
+import { createConfig, http, type CreateConnectorFn } from "wagmi";
 import { sepolia } from "wagmi/chains";
 
 /**
@@ -46,14 +46,45 @@ const browserWallet = (): Wallet => ({
   hidden: () => typeof window === "undefined" || !(window as { ethereum?: unknown }).ethereum,
 });
 
-export const config = getDefaultConfig({
-  appName: "Aether",
-  appDescription: "Aggregating Uniswap V2 · V3 · V4 on Sepolia.",
-  projectId,
-  // The default list is only Safe, Rainbow, Base, MetaMask and WalletConnect; every other wallet sat
-  // behind the WalletConnect button. Each entry connects in its own in-app browser and deep-links
-  // through WalletConnect elsewhere.
-  wallets: [
+const APP_NAME = "Aether";
+const APP_DESCRIPTION = "DEX aggregator on Sepolia.";
+
+/**
+ * wagmi runs every connector's `setup()` the moment the config is created, and WalletConnect's
+ * setup downloads and starts its SDK: about 1 MB of script, a relay connection and two calls to
+ * WalletConnect's servers on every page load, for visitors who never open the wallet dialog.
+ * Here the setup waits until the connector is actually used — a WalletConnect wallet is picked, or
+ * a previous WalletConnect session is being restored — and then runs first, as it always did.
+ */
+const deferSetup =
+  (create: CreateConnectorFn): CreateConnectorFn =>
+  (parameters) => {
+    const connector = create(parameters);
+    if (connector.type !== "walletConnect" || !connector.setup) return connector;
+
+    const setup = connector.setup.bind(connector);
+    let started: Promise<void> | undefined;
+    const start = () => (started ??= setup());
+
+    return {
+      ...connector,
+      setup: async () => {},
+      connect: (async (options) => {
+        await start();
+        return connector.connect(options);
+      }) as typeof connector.connect,
+      isAuthorized: async () => {
+        await start();
+        return connector.isAuthorized();
+      },
+    };
+  };
+
+// The default list is only Safe, Rainbow, Base, MetaMask and WalletConnect; every other wallet sat
+// behind the WalletConnect button. Each entry connects in its own in-app browser and deep-links
+// through WalletConnect elsewhere.
+const connectors = connectorsForWallets(
+  [
     {
       groupName: "Popular",
       wallets: [metaMaskWallet, trustWallet, okxWallet, bitgetWallet, binanceWallet, rabbyWallet],
@@ -63,6 +94,26 @@ export const config = getDefaultConfig({
       wallets: [safepalWallet, tokenPocketWallet, rainbowWallet, baseAccount, safeWallet, browserWallet, walletConnectWallet],
     },
   ],
+  {
+    projectId,
+    appName: APP_NAME,
+    appDescription: APP_DESCRIPTION,
+    walletConnectParameters: {
+      // What a wallet shows when it is asked to connect.
+      metadata: {
+        name: APP_NAME,
+        description: APP_DESCRIPTION,
+        url: typeof window !== "undefined" ? window.location.origin : "",
+        icons: [],
+      },
+    },
+  },
+).map(deferSetup);
+
+// Built with wagmi's own `createConfig` rather than RainbowKit's `getDefaultConfig`, which is the
+// same call with no way to reach the connectors in between.
+export const config = createConfig({
+  connectors,
   chains: [sepolia],
   transports: {
     [sepolia.id]: http(rpcUrl),
