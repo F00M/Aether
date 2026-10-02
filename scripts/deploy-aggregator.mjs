@@ -126,7 +126,7 @@ const client = createPublicClient({
 
 // What the diamond is configured with. The routers are Sepolia's; `externalTargets` are the
 // contracts a swap leg may call or receive native ETH from (the Universal Router is allowed by
-// AetherInit itself). Fee off, no token allowlist: every pool the engine finds stays routable.
+// AetherInit itself). No token allowlist: every pool the engine finds stays routable.
 const CONFIG = {
   weth: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14',
   v3Router: '0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E',
@@ -136,8 +136,10 @@ const CONFIG = {
     '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3', // Uniswap V2 router
     '0xE03A1074c86CFeDd5C142C4F04F1a1536e203543', // Uniswap V4 PoolManager
   ],
-  feeBps: 0,
-  feeRecipient: zeroAddress, // only used when feeBps > 0; the deployer is set as recipient at init
+  // 0.30% of every swap's output, paid in the output token (WETH when the swap pays out ETH).
+  // The contract caps this at 100 (1%).
+  feeBps: 30,
+  feeRecipient: '0xC0ffe8d7A16051eEf120C0A0D610b66e51bedd48',
   strictTokenList: false,
   allowedTokens: [],
   paused: false,
@@ -267,6 +269,16 @@ async function facetForUpgrade(wallet, name) {
   }
   console.log(`  ${name.padEnd(20)} ${address}  (dipakai ulang, bytecode cocok)`)
   return { address, hash: null, gasUsed: 0n }
+}
+
+const FEE_SAFE_VERSION = [3, 2, 0]
+function versionAtLeast(version, minimum) {
+  const parts = String(version).split('.').map(Number)
+  if (parts.length !== minimum.length || parts.some(Number.isNaN)) return false
+  for (let index = 0; index < minimum.length; index++) {
+    if (parts[index] !== minimum[index]) return parts[index] > minimum[index]
+  }
+  return true
 }
 
 // Owner calls that bring the contract at `address` in line with CONFIG — only the
@@ -410,6 +422,11 @@ if (configureAddress) {
   const [owner, version] = await Promise.all([read('owner'), read('VERSION').catch(() => '?')])
   const writes = await missingWrites(address)
   console.log(`${LF}Konfigurasi ${address}${rpcNote} — VERSION ${version}, owner ${owner}`)
+  // Before 3.2.0 execute() checked minAmountOut against the output BEFORE taking the fee, so with a
+  // fee on a swap could pay the recipient less than the minimum they signed.
+  if (CONFIG.feeBps > 0 && !versionAtLeast(version, FEE_SAFE_VERSION)) {
+    throw new Error(`Fee tidak boleh dinyalakan di VERSION ${version}. Upgrade dulu: npm run deploy:aggregator -- --upgrade AetherSwapFacet`)
+  }
   if (!writes.length) {
     console.log('  Konfigurasinya sudah lengkap. Tidak ada yang perlu dikirim.')
     process.exit(0)
@@ -480,6 +497,7 @@ if (upgradeFacet) {
   if (record?.diamond && getAddress(record.diamond) === diamond) {
     record.history = [...(record.history ?? []), { facet: upgradeFacet, from: [...oldFacets], to: deployed.address, at: new Date().toISOString() }]
     record.facets[upgradeFacet] = deployed.address
+    record.version = await read('VERSION').catch(() => record.version)
     writeRecord(record)
   }
   if (verify) await verifyOnBlockscout(upgradeFacet, deployed.address)

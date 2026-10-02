@@ -7,7 +7,7 @@ import { LibPoolSwap } from "../libraries/LibPoolSwap.sol";
 contract AetherSwapFacet {
     using SafeTransferV2 for IERC20V2;
 
-    string public constant VERSION = "3.1.0";
+    string public constant VERSION = "3.2.0";
 
     uint160 private constant MAX_UINT160 = type(uint160).max;
     uint48 private constant PERMIT2_EXPIRATION = type(uint48).max;
@@ -153,21 +153,20 @@ contract AetherSwapFacet {
 
         if (totalRouteInput > params.amountIn) revert InvalidAmount();
 
-        amountOut = _balanceOfAsset(outputAsset) - outputBefore;
+        uint256 grossOut = _balanceOfAsset(outputAsset) - outputBefore;
+        uint256 feeAmount = _takeFee(outputAsset, grossOut);
+        amountOut = grossOut - feeAmount;
         if (amountOut < params.minAmountOut) revert InsufficientOutput();
 
-        uint256 feeAmount = _takeFee(outputAsset, amountOut);
-        uint256 recipientAmount = amountOut - feeAmount;
-
         if (params.tokenOut == address(0)) {
-            _sendNative(params.recipient, recipientAmount);
+            _sendNative(params.recipient, amountOut);
         } else if (params.unwrapWeth) {
             address weth = LibAether.store().weth;
             if (outputToken != weth) revert InvalidRoute();
-            IWETH9V2(weth).withdraw(recipientAmount);
-            _sendNative(params.recipient, recipientAmount);
+            IWETH9V2(weth).withdraw(amountOut);
+            _sendNative(params.recipient, amountOut);
         } else {
-            IERC20V2(outputToken).safeTransfer(params.recipient, recipientAmount);
+            IERC20V2(outputToken).safeTransfer(params.recipient, amountOut);
         }
 
         _refundDustAsset(params.tokenIn, msg.sender);
@@ -178,7 +177,7 @@ contract AetherSwapFacet {
             }
         }
 
-        emit SwapExecuted(msg.sender, params.recipient, inputToken, outputToken, params.amountIn, recipientAmount, feeAmount);
+        emit SwapExecuted(msg.sender, params.recipient, inputToken, outputToken, params.amountIn, amountOut, feeAmount);
     }
 
     function _executeLeg(Leg calldata leg, uint256 amountIn) internal returns (uint256 amountOut) {

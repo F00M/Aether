@@ -1,6 +1,6 @@
 {
   "type": "EIP-2535 diamond",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "diamond": "0xD21D6bCF47e8b7a0611C0d1d2f718c94B0aC3334",
   "owner": "0xDA04759E54728B6636Fe48F7c9795c7B609bAaAa",
   "deployTx": "0xa985dc3a6b81d9c6ff7e518bbf21e5863472e14d1e83a5c41171fa857c95a62f",
@@ -13,7 +13,7 @@
     "EmergencyPauseFacet": "0x370aD32a34ed0EE718A0500Ee19D6FC9687899D9",
     "ConfigFacet": "0x34D7b8770D045FE902cAF3512956b19cd890c4e0",
     "WithdrawFacet": "0xcBC64357F5A210A7be1b743BB568D64D191b2Ea8",
-    "AetherSwapFacet": "0xA1d092f90F2fB4E93C6c7376E5368cDF0bD79759",
+    "AetherSwapFacet": "0xf62643A483C690301737d98eDE32974f5A9ae205",
     "PoolCallbackFacet": "0x33d50F40a62618aDbfc66b0a0eAC4e86D5f6B0c8"
   },
   "init": "0xA7aDDe747153876B35FdfB8E195ea37805E5D1c2",
@@ -53,6 +53,14 @@
       "from": [],
       "to": "0x33d50F40a62618aDbfc66b0a0eAC4e86D5f6B0c8",
       "at": "2026-09-22T19:51:32.060Z"
+    },
+    {
+      "facet": "AetherSwapFacet",
+      "from": [
+        "0xA1d092f90F2fB4E93C6c7376E5368cDF0bD79759"
+      ],
+      "to": "0xf62643A483C690301737d98eDE32974f5A9ae205",
+      "at": "2026-10-01T17:41:06.082Z"
     }
   ]
 }
