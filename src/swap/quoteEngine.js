@@ -61,7 +61,7 @@ import {
   v4PoolKnownLive,
 } from './quoteProviders'
 import { getTransitCandidates } from './poolIndex'
-import { feedV4PoolsBetween, loadPoolFeed, poolFeedSnapshot } from './poolFeed'
+import { feedV4PoolsBetween, loadPoolFeed, poolFeedReady, poolFeedSnapshot } from './poolFeed'
 import { bridgeTokens, refreshAutoHubs } from './autoHubs'
 
 export { API_QUOTE_REFRESH_AGE_MS, API_SANITY_MAX_LOCAL_BPS, POSITION_MANAGER, UNISWAP_API_ROUTER, UNIVERSAL_ROUTER } from './quoteConfig'
@@ -1705,8 +1705,11 @@ async function findSplitRoutesOnce(tokenIn, tokenOut, amountRaw, options = {}) {
   let transitAddresses = null
   let screenedCorridors = []
   if (fast) {
-    // Never block the first paint on the pool feed — just make sure it's warming for the full scan.
+    // Never block the first paint on the pool feed's scan — just make sure it's warming for the
+    // full scan. A stored copy that is still being indexed is waited for: it takes a fraction of a
+    // second, and without it this scan would fall back to guessed pools and their reverting calls.
     loadPoolFeed({ timeoutMs: 0 })
+    await poolFeedReady()
   } else {
     try {
       const transit = await getTransitCandidates(addrIn, addrOut, tradeConfig.maxTransitCandidates, { amountRaw })

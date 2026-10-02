@@ -135,12 +135,14 @@ function persistRaw(raw) {
 
 // ------------------------------------------------------------------ indexes
 
-// Rows indexed between two pauses when the build is allowed to breathe.
-const BUILD_SLICE = 2_500
+// Indexing ~17k pools and merging as many logs is done a slice at a time, with the browser free to
+// paint in between. A slice is a stretch of time, not a row count: a slow phone gets more pauses.
+// The clock is looked at every STEP_ROWS rows.
+const SLICE_MS = 8
+const STEP_ROWS = 256
 
-// The index is built by a generator so the same code serves two callers: the stored copy is
-// indexed in one go (its readers are synchronous), while a freshly scanned feed — ~17k pools on a
-// first visit — is indexed a slice at a time, with the browser free to paint in between.
+// The index is built by a generator that steps out every STEP_ROWS rows; whoever drives it decides
+// when to pause.
 function* indexRows(raw) {
   let indexed = 0
   const v4ByCurrency = new Map()   // currency (0x0 kept as ETH) -> V4 pool objects
@@ -180,7 +182,7 @@ function* indexRows(raw) {
       else v4ByCurrency.set(currency, [pool])
     }
     addEdge(c0, c1, 'v4', block)
-    if (++indexed % BUILD_SLICE === 0) yield
+    if (++indexed % STEP_ROWS === 0) yield
   }
 
   for (const [t0, t1, fee, pool, block] of raw.v3) {
@@ -190,13 +192,13 @@ function* indexRows(raw) {
     if (list) list.push(row)
     else v3ByPair.set(key, [row])
     addEdge(t0, t1, 'v3', block)
-    if (++indexed % BUILD_SLICE === 0) yield
+    if (++indexed % STEP_ROWS === 0) yield
   }
 
   for (const [t0, t1, pair, block] of raw.v2) {
     v2ByPair.set(pairKey(t0, t1), { pair, block })
     addEdge(t0, t1, 'v2', block)
-    if (++indexed % BUILD_SLICE === 0) yield
+    if (++indexed % STEP_ROWS === 0) yield
   }
 
   return {
@@ -209,18 +211,15 @@ function* indexRows(raw) {
   }
 }
 
-function buildSnapshot(raw) {
-  const steps = indexRows(raw)
-  let step = steps.next()
-  while (!step.done) step = steps.next()
-  return step.value
-}
-
 async function buildSnapshotInSlices(raw) {
   const steps = indexRows(raw)
+  let since = performance.now()
   let step = steps.next()
   while (!step.done) {
-    await breathe()
+    if (performance.now() - since >= SLICE_MS) {
+      await breathe()
+      since = performance.now()
+    }
     step = steps.next()
   }
   return step.value
@@ -316,9 +315,13 @@ async function mergeLogs({ v4Logs, v3Logs, v2Logs }) {
   const known = seenRows()
   let added = 0
   let read = 0
+  let since = performance.now()
   const take = async (logs, toRow, keyOf, rows, set) => {
     for (const log of logs) {
-      if (++read % BUILD_SLICE === 0) await breathe()
+      if (++read % STEP_ROWS === 0 && performance.now() - since >= SLICE_MS) {
+        await breathe()
+        since = performance.now()
+      }
       const row = toRow(log)
       if (!row) continue
       const key = keyOf(row)
@@ -336,10 +339,12 @@ async function mergeLogs({ v4Logs, v3Logs, v2Logs }) {
 
 // ------------------------------------------------------------------ state
 
-// The stored copy is ~1.4MB of JSON: it is read on first use rather than at import, so parsing it
-// and indexing ~17k pools doesn't sit in the page's own start-up.
+// The stored copy is ~1.4MB of JSON holding ~17k pools. It is read once the page has settled (see
+// the end of this file) or on first use, whichever comes first, and indexed in slices: done in one
+// go on the first quote, it held the page for ~80ms right as the user started typing.
 let raw = null
 let snapshot = null
+let indexing = null   // the stored copy being indexed; null once `snapshot` holds it
 let persistedTo = 0
 let inflight = null
 let lastRefreshAt = 0
@@ -347,15 +352,30 @@ let lastRefreshAt = 0
 function ensureLoaded() {
   if (raw) return
   raw = loadRaw()
-  snapshot = raw.to > 0 ? buildSnapshot(raw) : null
   persistedTo = raw.to
+  if (raw.to > 0) {
+    indexing = buildSnapshotInSlices(raw)
+      .then(built => { snapshot = built })
+      .finally(() => { indexing = null })
+  }
 }
 
 // Lets the browser paint and take input between the heavy steps of a refresh.
 const breathe = () => new Promise(resolve => setTimeout(resolve, 0))
 
+/**
+ * Resolves once the stored copy, if there is one, can be read through poolFeedSnapshot(). A
+ * fraction of a second at most — unlike loadPoolFeed, this never waits on the network.
+ */
+export function poolFeedReady() {
+  ensureLoaded()
+  return indexing ?? Promise.resolve()
+}
+
 async function refreshFeed() {
   ensureLoaded()
+  // New rows are merged into the same arrays the index is being built from: let it finish first.
+  if (indexing) await indexing
   const latest = await getLatestBlockNumber()
   if (latest === 0n) return snapshot
   const recentFloor = latest > FEED_LOOKBACK ? latest - FEED_LOOKBACK : 0n
@@ -419,11 +439,14 @@ export function loadPoolFeed({ timeoutMs = 8_000 } = {}) {
       .catch(() => snapshot)
       .finally(() => { inflight = null })
   }
-  if (!inflight) return Promise.resolve(snapshot)
+  if (!inflight) return indexing ? withDeadline(indexing.then(() => snapshot), timeoutMs, snapshot) : Promise.resolve(snapshot)
   return withDeadline(inflight, timeoutMs, snapshot)
 }
 
-/** Latest built snapshot, synchronously — null until the first scan (or stored copy) exists. */
+/**
+ * Latest built snapshot, synchronously — null until the first scan exists or the stored copy is
+ * indexed (await poolFeedReady() to be sure of the latter).
+ */
 export function poolFeedSnapshot() {
   ensureLoaded()
   return snapshot
@@ -472,4 +495,14 @@ export function feedV3Pools(feed, a, b) {
 
 export function feedV2Pair(feed, a, b) {
   return feed?.v2ByPair.get(pairKey(a, b)) ?? null
+}
+
+// ------------------------------------------------------------------ warm-up
+
+// A returning visitor's stored pools are read and indexed once the page is idle, so they are
+// usually ready before the first amount is typed.
+if (typeof window !== 'undefined') {
+  const warm = () => { try { ensureLoaded() } catch { /* storage unavailable — first use retries */ } }
+  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(warm, { timeout: 3_000 })
+  else setTimeout(warm, 1_500)
 }
